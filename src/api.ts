@@ -87,6 +87,8 @@ export interface WorkspaceState {
       lastChargedDaysAgo: number;
       lastUserInteractionDaysAgo: number;
       status: string;
+      source?: string;
+      paypalApprovalUrl?: string;
     }>;
     zombieReport: {
       audits: Array<{
@@ -353,6 +355,8 @@ export function fmtUsd(cents: number): string {
     maximumFractionDigits: 2,
   }).format(safe / 100);
 }
+
+export const formatUsd = fmtUsd;
 
 /**
  * Secure API helper: uses HttpOnly session cookies (`credentials: 'include'`)

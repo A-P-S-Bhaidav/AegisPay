@@ -2,6 +2,22 @@
   "version": 2,
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
+  "headers": [
+    {
+      "source": "/extension.zip",
+      "headers": [
+        { "key": "Content-Type", "value": "application/zip" },
+        { "key": "Content-Disposition", "value": "attachment; filename=\"aegispay-chrome-extension-mv3.zip\"" }
+      ]
+    },
+    {
+      "source": "/postman/AegisPay_Collection.json",
+      "headers": [
+        { "key": "Content-Type", "value": "application/json; charset=utf-8" },
+        { "key": "Content-Disposition", "value": "attachment; filename=\"AegisPay_Collection.json\"" }
+      ]
+    }
+  ],
   "rewrites": [
     {
       "source": "/api/(.*)",

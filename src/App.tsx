@@ -1,6 +1,7 @@
 import React, { Suspense, useCallback, useEffect, useState } from 'react';
 import {
   Compass,
+  Cpu,
   FileText,
   FlaskConical,
   LayoutGrid,
@@ -9,6 +10,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { AegisBrandMark, apiFetch, type WorkspaceState } from './api';
+import { AgenticCommandHub } from './components/AgenticCommandHub';
 import { AuthGate } from './components/AuthGate';
 import { GetPaidView } from './components/GetPaidView';
 import { INTERACTIVE_TOUR_STEPS, InteractiveTour } from './components/InteractiveTour';
@@ -30,6 +32,8 @@ export function App() {
   const [state, setState] = useState<WorkspaceState | null>(null);
   const [section, setSection] = useState<WorkspaceSectionId>('overview');
   const [inVerificationLab, setInVerificationLab] = useState(false);
+  const [mcpHubOpen, setMcpHubOpen] = useState(false);
+  const [mcpHubTab, setMcpHubTab] = useState<'mcp' | 'extension'>('mcp');
 
   // Interactive Onboarding Tour state
   const [tourOpen, setTourOpen] = useState(false);
@@ -328,8 +332,22 @@ export function App() {
             })}
           </nav>
 
-          {/* Right Actions: Guided Tour + Separate Verification Lab + Sign Out */}
+          {/* Right Actions: MCP & Extension Hub + Guided Tour + Separate Verification Lab + Sign Out */}
           <div className="order-2 lg:order-3 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setInVerificationLab(false);
+                setMcpHubTab('mcp');
+                setMcpHubOpen(true);
+              }}
+              className="btn-ghost-brutal px-3 py-1.5 text-xs border-[#CCFF00]/60 text-[#CCFF00]"
+              title="Open Live MCP Server & Chrome Extension Command Hub"
+            >
+              <Cpu className="w-3.5 h-3.5 text-[#CCFF00]" />
+              <span className="hidden sm:inline">MCP &amp; Extension</span>
+            </button>
+
             <button
               type="button"
               onClick={() => {
@@ -394,6 +412,15 @@ export function App() {
           </Suspense>
         ) : (
           <>
+            <AgenticCommandHub
+              onNavigate={(next) => setSection(next)}
+              onRefresh={async () => {
+                await loadWorkspaceState();
+              }}
+              externalHubOpen={mcpHubOpen}
+              externalHubTab={mcpHubTab}
+              onCloseExternalHub={() => setMcpHubOpen(false)}
+            />
             {section === 'overview' && (
               <WorkspaceOverview
                 state={state}
@@ -401,6 +428,13 @@ export function App() {
                 onStartTour={() => {
                   setTourStep(0);
                   setTourOpen(true);
+                }}
+                onRefresh={async () => {
+                  await loadWorkspaceState();
+                }}
+                onOpenMcpExtensionHub={(tab) => {
+                  setMcpHubTab(tab);
+                  setMcpHubOpen(true);
                 }}
               />
             )}

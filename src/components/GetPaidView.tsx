@@ -1,10 +1,16 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   CheckCircle2,
+  ClipboardPaste,
   ExternalLink,
   FileText,
+  FileUp,
   Handshake,
+  Plus,
   Send,
+  Sliders,
+  Sparkles,
+  Trash2,
   Users,
 } from 'lucide-react';
 import { apiFetch, fmtUsd, type WorkspaceState } from '../api';
@@ -14,12 +20,33 @@ interface GetPaidViewProps {
   onRefresh: () => Promise<void>;
 }
 
+interface EditableCollaborator {
+  collaboratorName: string;
+  paypalEmail: string;
+  role: string;
+  sharePct: number;
+}
+
 export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) => {
-  // Milestone Invoicing state
+  // Milestone Invoicing (PayStream) state
+  const [naturalProjectBrief, setNaturalProjectBrief] = useState('');
   const [projectTitle, setProjectTitle] = useState('E-Commerce Storefront & PayPal Redesign');
   const [clientEmail, setClientEmail] = useState('client-accounts@personal.example.com');
   const [budgetUsd, setBudgetUsd] = useState('2450');
-  const [leadShare, setLeadShare] = useState(70);
+  const [collaborators, setCollaborators] = useState<EditableCollaborator[]>([
+    {
+      collaboratorName: 'Lead Developer',
+      paypalEmail: 'lead-dev-sbx@personal.example.com',
+      role: 'Engineering',
+      sharePct: 70,
+    },
+    {
+      collaboratorName: 'Product Designer',
+      paypalEmail: 'designer-sbx@personal.example.com',
+      role: 'Design',
+      sharePct: 30,
+    },
+  ]);
   const [creatingPlan, setCreatingPlan] = useState(false);
   const [issuingMilestoneId, setIssuingMilestoneId] = useState('');
   const [proofLink, setProofLink] = useState(
@@ -27,48 +54,100 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
   );
   const [proofFeedback, setProofFeedback] = useState('');
 
-  // Vendor Deal Assistant state
+  // Vendor Deal Assistant (DealForge) state
+  const [naturalVendorQuote, setNaturalVendorQuote] = useState('');
+  const [showAdvancedDealMandate, setShowAdvancedDealMandate] = useState(false);
   const [dealTitle, setDealTitle] = useState('Annual Cloud Security Review');
+  const [vendorName, setVendorName] = useState('Sentinel Security Partners');
   const [targetUsd, setTargetUsd] = useState('620');
   const [maxUsd, setMaxUsd] = useState('820');
   const [vendorAskUsd, setVendorAskUsd] = useState('980');
   const [vendorFloorUsd, setVendorFloorUsd] = useState('640');
+  const [maxDeliveryDays, setMaxDeliveryDays] = useState('7');
+  const [minRevisions, setMinRevisions] = useState('2');
+  const [maxDepositPct, setMaxDepositPct] = useState('40');
+  const [manualOverrideUsd, setManualOverrideUsd] = useState('');
   const [negotiating, setNegotiating] = useState(false);
   const [dealResult, setDealResult] = useState<any>(null);
 
+  const sowFileRef = useRef<HTMLInputElement | null>(null);
+
   const activePlan = state.paystream.plans[0] || null;
 
-  const handleCreateMilestonePlan = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleUpdateCollaborator = (
+    idx: number,
+    field: keyof EditableCollaborator,
+    value: string | number
+  ) => {
+    setCollaborators((prev) =>
+      prev.map((c, i) => (i === idx ? { ...c, [field]: value } : c))
+    );
+  };
+
+  const handleAddCollaborator = () => {
+    setCollaborators((prev) => [
+      ...prev,
+      {
+        collaboratorName: `Collaborator ${prev.length + 1}`,
+        paypalEmail: `member${prev.length + 1}-sbx@personal.example.com`,
+        role: 'Specialist',
+        sharePct: 20,
+      },
+    ]);
+  };
+
+  const handleRemoveCollaborator = (idx: number) => {
+    if (collaborators.length <= 1) return;
+    setCollaborators((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleCreateMilestonePlan = async (e?: React.FormEvent, overrideBrief?: string) => {
+    e?.preventDefault();
     setCreatingPlan(true);
     setProofFeedback('');
     try {
-      const safeLead = Math.max(10, Math.min(90, leadShare));
-      await apiFetch('/api/paystream/create-plan', {
+      const nlText = (overrideBrief ?? naturalProjectBrief).trim();
+      const res = await apiFetch<any>('/api/paystream/create-plan', {
         method: 'POST',
         body: JSON.stringify({
+          naturalDescription: nlText || undefined,
           projectTitle,
           clientEmail,
           totalBudgetCents: Math.max(1000, Math.round(Number(budgetUsd || '2450') * 100)),
-          collaborators: [
-            {
-              collaboratorName: 'Lead Developer',
-              paypalEmail: 'lead-dev-sbx@personal.example.com',
-              role: 'Engineering',
-              sharePct: safeLead,
-            },
-            {
-              collaboratorName: 'Product Designer',
-              paypalEmail: 'designer-sbx@personal.example.com',
-              role: 'Design',
-              sharePct: 100 - safeLead,
-            },
-          ],
+          collaborators,
         }),
       });
+      if (res.parsedNaturalInput) {
+        setProjectTitle(res.parsedNaturalInput.projectTitle);
+        setClientEmail(res.parsedNaturalInput.clientEmail);
+        setBudgetUsd((res.parsedNaturalInput.totalBudgetCents / 100).toFixed(0));
+        if (Array.isArray(res.parsedNaturalInput.collaborators)) {
+          setCollaborators(res.parsedNaturalInput.collaborators);
+        }
+      }
       await onRefresh();
     } finally {
       setCreatingPlan(false);
+    }
+  };
+
+  const handleOneClickPasteSow = async () => {
+    try {
+      let clip = '';
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        clip = (await navigator.clipboard.readText()).trim();
+      }
+      if (!clip) {
+        clip =
+          'Mobile Checkout & PayPal Vault Integration for billing@northwind-commerce.io, total budget $3,600 across 3 milestones with Lead Engineer (60%), Product Designer (25%), and QA Automation (15%).';
+      }
+      setNaturalProjectBrief(clip);
+      await handleCreateMilestonePlan(undefined, clip);
+    } catch {
+      const fallback =
+        'Mobile Checkout & PayPal Vault Integration for billing@northwind-commerce.io, total budget $3,600 across 3 milestones with Lead Engineer (60%), Product Designer (25%), and QA Automation (15%).';
+      setNaturalProjectBrief(fallback);
+      await handleCreateMilestonePlan(undefined, fallback);
     }
   };
 
@@ -103,35 +182,54 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
     }
   };
 
-  const handleRunDealAssistant = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleRunDealAssistant = async (e?: React.FormEvent, overrideQuote?: string) => {
+    e?.preventDefault();
     setNegotiating(true);
     try {
-      const res = await apiFetch('/api/dealforge/negotiate', {
+      const nlQuote = (overrideQuote ?? naturalVendorQuote).trim();
+      const manualOverrideCents = manualOverrideUsd
+        ? Math.round(Number(manualOverrideUsd) * 100)
+        : undefined;
+
+      const res = await apiFetch<any>('/api/dealforge/negotiate', {
         method: 'POST',
         body: JSON.stringify({
-          buyerMandate: {
-            buyerName: state.operator?.organization || 'Buyer Team',
-            itemTitle: dealTitle,
-            targetPriceCents: Math.round(Number(targetUsd || '620') * 100),
-            maxPriceCents: Math.round(Number(maxUsd || '820') * 100),
-            maxDeliveryDays: 7,
-            minRevisions: 2,
-            maxUpfrontDepositPct: 40,
-          },
-          sellerMandate: {
-            sellerName: 'Verified Service Partner',
-            listPriceCents: Math.round(Number(vendorAskUsd || '980') * 100),
-            minPriceCents: Math.round(Number(vendorFloorUsd || '640') * 100),
-            fastestDeliveryDays: 4,
-            maxRevisionsAllowed: 3,
-            minUpfrontDepositPct: 25,
-          },
+          naturalDescription: nlQuote || undefined,
+          buyerMandate: nlQuote
+            ? undefined
+            : {
+                buyerName: state.operator?.organization || 'Buyer Team',
+                itemTitle: dealTitle,
+                targetPriceCents: Math.round(Number(targetUsd || '620') * 100),
+                maxPriceCents: Math.round(Number(maxUsd || '820') * 100),
+                maxDeliveryDays: Math.max(1, Math.round(Number(maxDeliveryDays || '7'))),
+                minRevisions: Math.max(0, Math.round(Number(minRevisions || '2'))),
+                maxUpfrontDepositPct: Math.max(10, Math.min(80, Math.round(Number(maxDepositPct || '40')))),
+              },
+          sellerMandate: nlQuote
+            ? undefined
+            : {
+                sellerName: vendorName || 'Verified Service Partner',
+                listPriceCents: Math.round(Number(vendorAskUsd || '980') * 100),
+                minPriceCents: Math.round(Number(vendorFloorUsd || '640') * 100),
+                fastestDeliveryDays: 4,
+                maxRevisionsAllowed: 3,
+                minUpfrontDepositPct: 25,
+              },
+          humanCounterOfferCents: manualOverrideCents,
           issueLiveInvoice: true,
           buyerEmail: clientEmail,
         }),
       });
       setDealResult(res);
+      if (res.parsedNaturalInput) {
+        setDealTitle(res.parsedNaturalInput.dealTitle);
+        setVendorName(res.parsedNaturalInput.sellerName);
+        setTargetUsd((res.parsedNaturalInput.targetPriceCents / 100).toFixed(0));
+        setMaxUsd((res.parsedNaturalInput.maxPriceCents / 100).toFixed(0));
+        setVendorAskUsd((res.parsedNaturalInput.vendorAskCents / 100).toFixed(0));
+        setVendorFloorUsd((res.parsedNaturalInput.vendorFloorCents / 100).toFixed(0));
+      }
       await onRefresh();
     } finally {
       setNegotiating(false);
@@ -143,23 +241,89 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
       {/* Top Symmetrical 2-Column Milestone Planner & Live PayPal Invoices */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <div className="lg:col-span-5 glass-brutal-panel corner-ticks p-6 space-y-4">
-          <div className="border-b border-[#1E293B] pb-3">
-            <div className="text-xs font-mono uppercase text-[#CCFF00]">
-              Client Projects &amp; Agencies
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1E293B] pb-3">
+            <div>
+              <div className="text-xs font-mono uppercase text-[#CCFF00]">
+                Client Projects &amp; Multi-Collaborator Splits
+              </div>
+              <h2 className="font-display text-xl font-bold text-white">
+                Create Milestone Invoices &amp; Team Splits
+              </h2>
             </div>
-            <h2 className="font-display text-xl font-bold text-white">
-              Create Milestone Invoices &amp; Team Splits
-            </h2>
+
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                disabled={creatingPlan}
+                onClick={() => void handleOneClickPasteSow()}
+                className="btn-cobalt px-2.5 py-1.5 text-xs flex items-center gap-1"
+                title="Read SOW or project brief from clipboard and generate milestones in 1 click"
+              >
+                <ClipboardPaste className="w-3.5 h-3.5" />
+                <span>1-Click Paste SOW</span>
+              </button>
+              <input
+                ref={sowFileRef}
+                type="file"
+                accept=".txt,.md,.eml,.csv,.json"
+                className="hidden"
+                onChange={async (e) => {
+                  const f = e.target.files?.[0];
+                  if (!f) return;
+                  const text = (await f.text()).slice(0, 6000);
+                  setNaturalProjectBrief(text);
+                  await handleCreateMilestonePlan(undefined, text);
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => sowFileRef.current?.click()}
+                className="btn-ghost-brutal px-2.5 py-1.5 text-xs flex items-center gap-1"
+              >
+                <FileUp className="w-3.5 h-3.5 text-[#CCFF00]" />
+                <span>Upload SOW</span>
+              </button>
+            </div>
           </div>
 
-          <form onSubmit={handleCreateMilestonePlan} className="space-y-3.5">
+          {/* Natural-Language Project Brief Input */}
+          <div className="space-y-1.5">
+            <label className="block text-xs font-mono text-[#CCFF00]">
+              Describe Any Project or Paste a Client SOW in Plain English:
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={naturalProjectBrief}
+                onChange={(e) => setNaturalProjectBrief(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void handleCreateMilestonePlan();
+                  }
+                }}
+                placeholder="e.g. Mobile App Redesign for client@acme.io, $3,600 budget, 60% Lead Dev, 25% Designer, 15% QA..."
+                className="input-brutal text-xs flex-1"
+              />
+              <button
+                type="button"
+                disabled={creatingPlan}
+                onClick={() => void handleCreateMilestonePlan()}
+                className="btn-acid px-3 py-1.5 text-xs shrink-0"
+              >
+                Parse SOW
+              </button>
+            </div>
+          </div>
+
+          <form onSubmit={(e) => void handleCreateMilestonePlan(e)} className="space-y-3.5">
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1">Project Title</label>
               <input
                 type="text"
                 value={projectTitle}
                 onChange={(e) => setProjectTitle(e.target.value)}
-                className="input-brutal"
+                className="input-brutal text-xs"
                 required
               />
             </div>
@@ -173,7 +337,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                   type="email"
                   value={clientEmail}
                   onChange={(e) => setClientEmail(e.target.value)}
-                  className="input-brutal"
+                  className="input-brutal text-xs"
                   required
                 />
               </div>
@@ -187,30 +351,76 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                   step="0.01"
                   value={budgetUsd}
                   onChange={(e) => setBudgetUsd(e.target.value)}
-                  className="input-brutal"
+                  className="input-brutal text-xs"
                   required
                 />
               </div>
             </div>
 
-            <div>
-              <div className="flex items-center justify-between text-xs text-slate-300 mb-1">
-                <span className="inline-flex items-center gap-1">
+            {/* Dynamic Multi-Collaborator Editor */}
+            <div className="space-y-2 border-t border-[#1E293B] pt-3">
+              <div className="flex items-center justify-between text-xs">
+                <span className="inline-flex items-center gap-1.5 font-semibold text-white">
                   <Users className="w-3.5 h-3.5 text-[#CCFF00]" />
-                  Team Revenue Split
+                  Team Collaborator Splits ({collaborators.length} Members)
                 </span>
-                <span className="font-mono text-[#CCFF00]">
-                  Lead {leadShare}% / Designer {100 - leadShare}%
-                </span>
+                <button
+                  type="button"
+                  onClick={handleAddCollaborator}
+                  className="px-2 py-1 text-[11px] font-mono bg-[#050507] border border-[#243049] text-[#CCFF00] hover:border-[#CCFF00] flex items-center gap-1"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Add Member</span>
+                </button>
               </div>
-              <input
-                type="range"
-                min={20}
-                max={80}
-                value={leadShare}
-                onChange={(e) => setLeadShare(Number(e.target.value))}
-                className="w-full"
-              />
+
+              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                {collaborators.map((c, idx) => (
+                  <div
+                    key={idx}
+                    className="grid grid-cols-12 gap-1.5 items-center bg-[#050507] p-2 border border-[#1E293B]"
+                  >
+                    <input
+                      type="text"
+                      value={c.collaboratorName}
+                      onChange={(e) =>
+                        handleUpdateCollaborator(idx, 'collaboratorName', e.target.value)
+                      }
+                      placeholder="Name"
+                      className="input-brutal col-span-4 text-[11px] py-1"
+                    />
+                    <input
+                      type="email"
+                      value={c.paypalEmail}
+                      onChange={(e) =>
+                        handleUpdateCollaborator(idx, 'paypalEmail', e.target.value)
+                      }
+                      placeholder="PayPal Email"
+                      className="input-brutal col-span-4 text-[11px] py-1"
+                    />
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      value={c.sharePct}
+                      onChange={(e) =>
+                        handleUpdateCollaborator(idx, 'sharePct', Number(e.target.value) || 10)
+                      }
+                      title="Share %"
+                      className="input-brutal col-span-3 text-[11px] py-1"
+                    />
+                    <button
+                      type="button"
+                      disabled={collaborators.length <= 1}
+                      onClick={() => handleRemoveCollaborator(idx)}
+                      className="col-span-1 text-slate-400 hover:text-red-400 flex justify-center"
+                      title="Remove collaborator"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
 
             <button
@@ -244,8 +454,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
 
           {!activePlan ? (
             <div className="py-12 text-center text-xs text-slate-400">
-              Click &ldquo;Create Milestone Schedule&rdquo; on the left to split your project into
-              PayPal invoices.
+              Click &ldquo;1-Click Paste SOW&rdquo; or &ldquo;Create Milestone Schedule&rdquo; on the left to split your project into PayPal invoices.
             </div>
           ) : (
             <div className="space-y-3">
@@ -315,12 +524,26 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                 <label className="block text-xs text-slate-400">
                   Delivery link or completion summary (used when clicking Verify Delivery Link):
                 </label>
-                <input
-                  type="text"
-                  value={proofLink}
-                  onChange={(e) => setProofLink(e.target.value)}
-                  className="input-brutal"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={proofLink}
+                    onChange={(e) => setProofLink(e.target.value)}
+                    className="input-brutal text-xs flex-1"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (navigator.clipboard?.readText) {
+                        const clip = (await navigator.clipboard.readText()).trim();
+                        if (clip) setProofLink(clip);
+                      }
+                    }}
+                    className="btn-ghost-brutal px-3 py-1.5 text-xs shrink-0"
+                  >
+                    Paste Link
+                  </button>
+                </div>
                 {proofFeedback && (
                   <div className="text-xs font-mono text-[#CCFF00] pt-1">{proofFeedback}</div>
                 )}
@@ -330,23 +553,66 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
         </div>
       </div>
 
-      {/* Bottom Section: Automated Vendor Deal & Deposit Agreement */}
+      {/* Bottom Section: Automated Vendor Deal & Deposit Agreement (DealForge) */}
       <div className="glass-brutal-panel p-6 space-y-4">
-        <div className="flex items-center gap-2 border-b border-[#1E293B] pb-3">
-          <Handshake className="w-5 h-5 text-[#CCFF00]" />
-          <div>
-            <h3 className="font-display text-lg font-bold text-white">
-              Vendor Quote &amp; Deposit Agreement Assistant
-            </h3>
-            <p className="text-xs text-slate-400">
-              Set your target budget and maximum cap—AegisPay finds a fair middle ground with the
-              vendor and generates the deposit PayPal invoice.
-            </p>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1E293B] pb-3">
+          <div className="flex items-center gap-2">
+            <Handshake className="w-5 h-5 text-[#CCFF00]" />
+            <div>
+              <h3 className="font-display text-lg font-bold text-white">
+                Vendor Quote &amp; Deposit Agreement Assistant
+              </h3>
+              <p className="text-xs text-slate-400">
+                Paste any vendor quote in plain English or customize your negotiation mandate — AegisPay runs a 4-round Buyer vs. Vendor clearing protocol and issues the PayPal deposit invoice.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowAdvancedDealMandate((v) => !v)}
+            className="btn-ghost-brutal px-3 py-1.5 text-xs flex items-center gap-1.5"
+          >
+            <Sliders className="w-3.5 h-3.5 text-[#CCFF00]" />
+            <span>
+              {showAdvancedDealMandate ? 'Hide Advanced Mandate' : 'Advanced Mandate & Floor'}
+            </span>
+          </button>
+        </div>
+
+        {/* Natural-Language Vendor Quote Bar */}
+        <div className="p-3.5 bg-[#050507] border border-[#243049] space-y-1.5">
+          <label className="block text-xs font-mono uppercase text-[#CCFF00]">
+            Describe Any Vendor Quote or Paste a Proposal Email:
+          </label>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              value={naturalVendorQuote}
+              onChange={(e) => setNaturalVendorQuote(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void handleRunDealAssistant();
+                }
+              }}
+              placeholder="e.g. Sentinel Security quoted $980 (floor $640) for SOC2 PenTest; our target is $660 (max $840), 6-day delivery, 2 revisions..."
+              className="input-brutal text-xs flex-1"
+            />
+            <button
+              type="button"
+              disabled={negotiating}
+              onClick={() => void handleRunDealAssistant()}
+              className="btn-acid px-4 py-2 text-xs shrink-0 flex items-center gap-1.5"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>{negotiating ? 'Negotiating...' : 'Parse & Negotiate'}</span>
+            </button>
           </div>
         </div>
 
         <form
-          onSubmit={handleRunDealAssistant}
+          onSubmit={(e) => void handleRunDealAssistant(e)}
           className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end"
         >
           <div className="lg:col-span-2">
@@ -354,8 +620,11 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
             <input
               type="text"
               value={dealTitle}
-              onChange={(e) => setDealTitle(e.target.value)}
-              className="input-brutal"
+              onChange={(e) => {
+                setNaturalVendorQuote('');
+                setDealTitle(e.target.value);
+              }}
+              className="input-brutal text-xs"
             />
           </div>
           <div>
@@ -363,8 +632,11 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
             <input
               type="number"
               value={targetUsd}
-              onChange={(e) => setTargetUsd(e.target.value)}
-              className="input-brutal"
+              onChange={(e) => {
+                setNaturalVendorQuote('');
+                setTargetUsd(e.target.value);
+              }}
+              className="input-brutal text-xs"
             />
           </div>
           <div>
@@ -372,8 +644,11 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
             <input
               type="number"
               value={maxUsd}
-              onChange={(e) => setMaxUsd(e.target.value)}
-              className="input-brutal"
+              onChange={(e) => {
+                setNaturalVendorQuote('');
+                setMaxUsd(e.target.value);
+              }}
+              className="input-brutal text-xs"
             />
           </div>
           <div>
@@ -381,8 +656,11 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
             <input
               type="number"
               value={vendorAskUsd}
-              onChange={(e) => setVendorAskUsd(e.target.value)}
-              className="input-brutal"
+              onChange={(e) => {
+                setNaturalVendorQuote('');
+                setVendorAskUsd(e.target.value);
+              }}
+              className="input-brutal text-xs"
             />
           </div>
           <button type="submit" disabled={negotiating} className="btn-cobalt py-2.5 text-xs">
@@ -390,34 +668,129 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
           </button>
         </form>
 
+        {showAdvancedDealMandate && (
+          <div className="p-4 bg-[#050507] border border-[#243049] grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs">
+            <div>
+              <label className="block text-slate-400 mb-1">Vendor Name</label>
+              <input
+                type="text"
+                value={vendorName}
+                onChange={(e) => setVendorName(e.target.value)}
+                className="input-brutal text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Vendor Floor ($)</label>
+              <input
+                type="number"
+                value={vendorFloorUsd}
+                onChange={(e) => setVendorFloorUsd(e.target.value)}
+                className="input-brutal text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Max Delivery Days</label>
+              <input
+                type="number"
+                value={maxDeliveryDays}
+                onChange={(e) => setMaxDeliveryDays(e.target.value)}
+                className="input-brutal text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Min Revisions</label>
+              <input
+                type="number"
+                value={minRevisions}
+                onChange={(e) => setMinRevisions(e.target.value)}
+                className="input-brutal text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Max Upfront Deposit %</label>
+              <input
+                type="number"
+                value={maxDepositPct}
+                onChange={(e) => setMaxDepositPct(e.target.value)}
+                className="input-brutal text-xs"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-400 mb-1">Manual Counter-Offer ($)</label>
+              <input
+                type="number"
+                value={manualOverrideUsd}
+                onChange={(e) => setManualOverrideUsd(e.target.value)}
+                placeholder="Optional override"
+                className="input-brutal text-xs"
+              />
+            </div>
+          </div>
+        )}
+
         {dealResult && (
-          <div className="p-4 bg-[#080B13] border border-[#0047FF] flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs">
+          <div className="p-4 bg-[#080B13] border border-[#0047FF] space-y-4 text-xs">
             {dealResult.dealReached ? (
               <>
-                <div className="space-y-1">
-                  <div className="text-sm font-semibold text-white">
-                    Agreed at {fmtUsd(dealResult.contract.agreedTerms.priceCents)} (Saved{' '}
-                    {fmtUsd(dealResult.contract.buyerSavedCents)} off vendor quote)
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="text-sm font-semibold text-white">
+                      Agreed at {fmtUsd(dealResult.contract.agreedTerms.priceCents)} (Saved{' '}
+                      {fmtUsd(dealResult.contract.buyerSavedCents)} off vendor quote)
+                    </div>
+                    <div className="text-slate-300">
+                      Upfront PayPal Deposit ({dealResult.contract.agreedTerms.upfrontDepositPct}%):{' '}
+                      <strong>{fmtUsd(dealResult.contract.upfrontDepositCents)}</strong> • Remaining
+                      on completion: {fmtUsd(dealResult.contract.escrowCompletionCents)} •{' '}
+                      {dealResult.contract.agreedTerms.deliveryDays} days •{' '}
+                      {dealResult.contract.agreedTerms.revisionsIncluded} revisions
+                    </div>
+                    <div className="font-mono text-[11px] text-[#CCFF00]">
+                      Contract SHA-256: {String(dealResult.contract.contractHash).slice(0, 28)}...
+                    </div>
                   </div>
-                  <div className="text-slate-300">
-                    Upfront PayPal Deposit ({dealResult.contract.agreedTerms.upfrontDepositPct}%):{' '}
-                    <strong>{fmtUsd(dealResult.contract.upfrontDepositCents)}</strong> • Remaining
-                    on completion: {fmtUsd(dealResult.contract.escrowCompletionCents)}
-                  </div>
+                  {(dealResult.paypalInvoice?.payerViewUrl ||
+                    dealResult.paypalOrder?.approvalUrl) && (
+                    <a
+                      href={
+                        dealResult.paypalInvoice?.payerViewUrl ||
+                        dealResult.paypalOrder?.approvalUrl
+                      }
+                      target="_blank"
+                      rel="noreferrer"
+                      className="btn-acid px-3.5 py-2 text-xs shrink-0"
+                    >
+                      Open Deposit in PayPal
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  )}
                 </div>
-                {(dealResult.paypalInvoice?.payerViewUrl ||
-                  dealResult.paypalOrder?.approvalUrl) && (
-                  <a
-                    href={
-                      dealResult.paypalInvoice?.payerViewUrl || dealResult.paypalOrder?.approvalUrl
-                    }
-                    target="_blank"
-                    rel="noreferrer"
-                    className="btn-acid px-3.5 py-2 text-xs shrink-0"
-                  >
-                    Open Deposit in PayPal
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
+
+                {/* Multi-Round Negotiation Transcript */}
+                {Array.isArray(dealResult.rounds) && dealResult.rounds.length > 0 && (
+                  <div className="border-t border-[#1E293B] pt-3 space-y-2">
+                    <div className="text-[11px] font-mono uppercase text-slate-400">
+                      Multi-Round Buyer vs. Vendor Negotiation Transcript
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+                      {dealResult.rounds.map((r: any) => (
+                        <div
+                          key={r.round}
+                          className="p-2.5 bg-[#050507] border border-[#1E293B] space-y-1"
+                        >
+                          <div className="flex items-center justify-between font-mono text-[10px]">
+                            <span className="text-[#CCFF00]">
+                              Round {r.round} • {r.speaker}
+                            </span>
+                            <span className="text-white font-bold">
+                              {fmtUsd(r.proposedTerms.priceCents)}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-300 line-clamp-3">{r.message}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </>
             ) : (

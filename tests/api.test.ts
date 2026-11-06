@@ -1017,6 +1017,197 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
     expect(signedData.verificationMethod).toBe('KERNEL_HMAC_SHA256');
   });
 
+  it('serves Chrome Extension ZIP and Postman Collection via /api/download/extension and /api/download/postman with attachment headers', async () => {
+    const extRes = await fetch(`${baseUrl}/api/download/extension`);
+    expect(extRes.status).toBe(200);
+    expect(extRes.headers.get('content-disposition')).toContain(
+      'attachment; filename="aegispay-chrome-extension-mv3.zip"'
+    );
+    const extBuf = Buffer.from(await extRes.arrayBuffer());
+    // PK\x03\x04 ZIP magic bytes
+    expect(extBuf.length).toBeGreaterThan(1000);
+    expect(extBuf[0]).toBe(0x50);
+    expect(extBuf[1]).toBe(0x4b);
+
+    const pmRes = await fetch(`${baseUrl}/api/download/postman`);
+    expect(pmRes.status).toBe(200);
+    expect(pmRes.headers.get('content-disposition')).toContain(
+      'attachment; filename="AegisPay_Collection.json"'
+    );
+    const pmJson = await pmRes.json();
+    expect(pmJson.info?.name).toBeDefined();
+  });
+
+  it('runs a live HTTP JSON-RPC 2.0 MCP Server at /api/mcp with 13 tools and executes tools/call', async () => {
+    const metaRes = await fetch(`${baseUrl}/api/mcp`, { headers: authHeaders });
+    expect(metaRes.status).toBe(200);
+    const meta = await metaRes.json();
+    expect(meta.status).toBe('ONLINE');
+    expect(meta.toolsCount).toBe(13);
+
+    const listRes = await fetch(`${baseUrl}/api/mcp`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    });
+    expect(listRes.status).toBe(200);
+    const listData = await listRes.json();
+    expect(listData.result.tools.length).toBe(13);
+
+    const callRes = await fetch(`${baseUrl}/api/mcp`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: {
+          name: 'aegis_check_affordability',
+          arguments: {
+            query:
+              'Can I afford a $450 laptop monitor if my checking balance is $6,600 and rent of $1,800 is due in 5 days?',
+          },
+        },
+      }),
+    });
+    expect(callRes.status).toBe(200);
+    const callData = await callRes.json();
+    expect(callData.result.structuredContent.result.verdict).toBe('ALLOW');
+  });
+
+  it('supports real subscription import, PayPal Sandbox sync, and 1-click batch cleanup', async () => {
+    const addRes = await fetch(`${baseUrl}/api/lupa/subscriptions/add`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        rawText:
+          '2026-10-04,Legacy Cloud Metrics,$89.00,RECURRING,Unused for 140 days\n2026-10-09,StreamBox Ultra,$29.00,AUTOPAY,Unused for 110 days',
+      }),
+    });
+    expect(addRes.status).toBe(200);
+    const addData = await addRes.json();
+    expect(addData.addedPermissions.length).toBeGreaterThanOrEqual(2);
+
+    const syncRes = await fetch(`${baseUrl}/api/lupa/subscriptions/sync-paypal`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({}),
+    });
+    expect(syncRes.status).toBe(200);
+    const syncData = await syncRes.json();
+    expect(Array.isArray(syncData.billingPermissions)).toBe(true);
+
+    const cleanRes = await fetch(`${baseUrl}/api/lupa/subscriptions/clean-all`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({}),
+    });
+    expect(cleanRes.status).toBe(200);
+    const cleanData = await cleanRes.json();
+    expect(cleanData.revokedCount + cleanData.tightenedCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('parses natural-language cashflow queries and open-ended descriptions across all workflows and Universal Agent Ingest', async () => {
+    // 1. Natural cashflow query
+    const cfRes = await fetch(`${baseUrl}/api/lupa/cashflow-natural`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        query:
+          'Can I afford a $250 espresso machine if my checking balance is $6,800, safety buffer is $600, and my $1,700 rent is due in 6 days?',
+      }),
+    });
+    expect(cfRes.status).toBe(200);
+    const cfData = await cfRes.json();
+    expect(cfData.parsed.proposedSpendCents).toBe(25000);
+    expect(cfData.result.verdict).toBe('ALLOW');
+
+    // 2. Natural failed payment recovery
+    const prRes = await fetch(`${baseUrl}/api/payrevive/recover`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        naturalDescription:
+          'Customer Maya Lin (maya@acme.io) had a $189 annual plan fail with INSUFFICIENT_FUNDS 2 days before Friday payday, has PayPal backup wallet.',
+        executeLivePayPal: true,
+      }),
+    });
+    expect(prRes.status).toBe(200);
+    const prData = await prRes.json();
+    expect(prData.decision.verdict).toBe('EXECUTE_RECOVERY');
+
+    // 3. Natural damage claim partial refund
+    const crRes = await fetch(`${baseUrl}/api/cliprefund/evaluate-and-refund`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        naturalDescription:
+          'Buyer received the $180 Ceramic Pour-Over Set with a small cosmetic glaze chip on the handle and wants a partial refund to keep it.',
+      }),
+    });
+    expect(crRes.status).toBe(200);
+    const crData = await crRes.json();
+    expect(crData.calculation.approved).toBe(true);
+
+    // 4. Natural churn rescue
+    const chRes = await fetch(`${baseUrl}/api/churnrescue/intercept`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        naturalDescription:
+          'Subscriber Sam Patel on Pro Plan ($89/mo, 35% usage) clicked cancel saying monthly cost is too high.',
+      }),
+    });
+    expect(chRes.status).toBe(200);
+    const chData = await chRes.json();
+    expect(chData.decision.approvedDiscountPct).toBeGreaterThan(0);
+
+    // 5. Natural project brief milestone plan
+    const psRes = await fetch(`${baseUrl}/api/paystream/create-plan`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        naturalDescription:
+          'Redesign Checkout UI for billing@acme.io, total budget $3,000 across 3 milestones with Lead Dev (70%) and Designer (30%).',
+      }),
+    });
+    expect(psRes.status).toBe(200);
+    const psData = await psRes.json();
+    expect(psData.plan.pennyExactVerified).toBe(true);
+
+    // 6. Natural vendor deal negotiation
+    const dfRes = await fetch(`${baseUrl}/api/dealforge/negotiate`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        naturalDescription:
+          'Negotiate SOC2 Audit with Sentinel Security: vendor quoted $980 (floor $640), our target is $680 (max $840), 6 days delivery, 2 revisions.',
+        issueLiveInvoice: true,
+      }),
+    });
+    expect(dfRes.status).toBe(200);
+    const dfData = await dfRes.json();
+    expect(dfData.dealReached).toBe(true);
+
+    // 7. Universal Agent Ingest & Proactive Suggestions
+    const ingRes = await fetch(`${baseUrl}/api/agent/ingest`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        rawText:
+          'URGENT INVOICE #9912 from support@paypa1-security-alert.com: wire $650.00 within 15 minutes or account suspended.',
+      }),
+    });
+    expect(ingRes.status).toBe(200);
+    const ingData = await ingRes.json();
+    expect(ingData.detectedWorkflow).toBe('INVOICE_SAFETY');
+
+    const sugRes = await fetch(`${baseUrl}/api/agent/suggestions`, { headers: authHeaders });
+    expect(sugRes.status).toBe(200);
+    const sugData = await sugRes.json();
+    expect(Array.isArray(sugData.suggestions)).toBe(true);
+  });
+
   const stressSteps = Array.from({ length: 40 }, (_, idx) => idx + 1);
   it.each(stressSteps)(
     'API deterministic concurrency invariant check #%i',
@@ -1035,4 +1226,5 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
     }
   );
 });
+
 

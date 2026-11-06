@@ -65,6 +65,10 @@ import {
   TenantWorkspace,
   verifyPasswordScrypt,
 } from './store';
+import {
+  EMBEDDED_EXTENSION_ZIP_BASE64,
+  EMBEDDED_POSTMAN_COLLECTION_JSON,
+} from './embeddedAssets';
 
 if (!process.env.VITEST) {
   dotenv.config();
@@ -944,6 +948,834 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     });
   });
 
+  function syncAutopayCommitment(ws: TenantWorkspace): void {
+    const totalActiveCents = ws.billingPermissions
+      .filter((p) => p.status === 'ACTIVE')
+      .reduce((acc, p) => acc + p.averageChargeCents, 0);
+    const existing = ws.cashflowCommitments.find((c) => c.id === 'cf_paypal_subs');
+    if (existing) {
+      existing.amountCents = totalActiveCents;
+    } else if (totalActiveCents > 0) {
+      ws.cashflowCommitments.push({
+        id: 'cf_paypal_subs',
+        name: 'Active PayPal Autopays & Subscriptions',
+        amountCents: totalActiveCents,
+        dueInDays: 10,
+        category: 'PAYPAL_AUTOPAY',
+        mandatory: false,
+      });
+    }
+  }
+
+  function resolveMcpOrDemoWorkspace(req: Request): TenantWorkspace {
+    const resolved = resolveSessionOperator(req);
+    if (resolved) {
+      return store.getTenantWorkspace(resolved.operator.id, resolved.operator.email);
+    }
+    const demoUser = store.getUserByEmail('demo@aegispay.io');
+    if (demoUser) {
+      return store.getTenantWorkspace(demoUser.id, demoUser.email);
+    }
+    return store.getTenantWorkspace('op_demo_01', 'demo@aegispay.io');
+  }
+
+  // Guaranteed Browser Download Endpoints (works on localhost & Vercel Serverless)
+  app.get('/api/download/extension', readLimiter.middleware(), (_req, res) => {
+    const candidates = [
+      path.join(ROOT_DIR, 'public', 'extension.zip'),
+      path.join(process.cwd(), 'public', 'extension.zip'),
+      path.join(process.cwd(), 'dist', 'extension.zip'),
+    ];
+    const found = candidates.find((p) => fs.existsSync(p));
+    const zipBuffer = found
+      ? fs.readFileSync(found)
+      : Buffer.from(EMBEDDED_EXTENSION_ZIP_BASE64, 'base64');
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="aegispay-chrome-extension-mv3.zip"'
+    );
+    res.setHeader('Content-Length', String(zipBuffer.length));
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(zipBuffer);
+  });
+
+  app.get('/api/download/postman', readLimiter.middleware(), (_req, res) => {
+    const candidates = [
+      path.join(ROOT_DIR, 'postman', 'AegisPay_Collection.json'),
+      path.join(process.cwd(), 'postman', 'AegisPay_Collection.json'),
+      path.join(process.cwd(), 'public', 'postman', 'AegisPay_Collection.json'),
+    ];
+    const found = candidates.find((p) => fs.existsSync(p));
+    const jsonString = found ? fs.readFileSync(found, 'utf8') : EMBEDDED_POSTMAN_COLLECTION_JSON;
+
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="AegisPay_Collection.json"');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(jsonString);
+  });
+
+  // ==========================================================================
+  // LIVE ALWAYS-ON MODEL CONTEXT PROTOCOL (MCP) SERVER (/api/mcp)
+  // Supports JSON-RPC 2.0 (`initialize`, `ping`, `tools/list`, `tools/call`)
+  // and direct REST tool invocation across all 13 AegisPay tools.
+  // ==========================================================================
+
+  const MCP_TOOLS_CATALOG = [
+    {
+      name: 'aegispay_list_permits',
+      category: 'Pay Safely',
+      description:
+        'List all active PayPal buyer-side spending permits delegated to AI agents, including single-transaction caps, daily caps, auto-allow thresholds, and confidence floors.',
+      sampleArgs: {},
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'aegispay_check_cashflow',
+      category: 'Pay Safely',
+      description:
+        'Evaluate whether a purchase is affordable in plain English (e.g. "Can I afford a $1,250 MacBook Air if my balance is $4,200?") or structured cents, with PayPal Pay-in-4 simulation.',
+      sampleArgs: {
+        query: 'Can I afford a $640 4K Studio Display this week while keeping my safety buffer?',
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          itemTitle: { type: 'string' },
+          proposedSpendCents: { type: 'integer' },
+        },
+      },
+    },
+    {
+      name: 'aegispay_audit_subscriptions',
+      category: 'Pay Safely',
+      description:
+        'Discover, sync from PayPal Sandbox, import from statement text, or auto-clean all flagged recurring subscriptions and autopays.',
+      sampleArgs: { action: 'AUDIT' },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['AUDIT', 'SYNC_PAYPAL', 'CLEAN_ALL', 'IMPORT_TEXT'],
+          },
+          rawText: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'aegispay_compile_spending_rule',
+      category: 'Pay Safely',
+      description:
+        'Compile a plain-English spending rule sentence into deterministic PayPal agent spending limits with numeric grounding verification.',
+      sampleArgs: {
+        sentence:
+          'Allow up to $150 per order, auto-approve under $60 at 88% confidence for software and cloud.',
+      },
+      inputSchema: {
+        type: 'object',
+        properties: { sentence: { type: 'string' } },
+        required: ['sentence'],
+      },
+    },
+    {
+      name: 'aegispay_agent_pay',
+      category: 'Pay Safely',
+      description:
+        'Submit an autonomous agent payment request against a delegated PayPal permit. Returns ALLOW (PayPal CAPTURE), HOLD (PayPal AUTHORIZE), or BLOCK.',
+      sampleArgs: {
+        amountCents: 4200,
+        merchantName: 'Cloudflare Pro Seat',
+        category: 'CLOUD',
+        itemDescription: 'Monthly DNS & WAF Seat',
+        aiConfidenceScore: 0.94,
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          permitId: { type: 'string' },
+          amountCents: { type: 'integer' },
+          merchantName: { type: 'string' },
+          category: { type: 'string' },
+          itemDescription: { type: 'string' },
+          aiConfidenceScore: { type: 'number' },
+        },
+        required: ['amountCents', 'merchantName', 'itemDescription'],
+      },
+    },
+    {
+      name: 'aegispay_scamshield_review',
+      category: 'Pay Safely',
+      description:
+        'Scan an invoice, email, or payment request text for social-engineering scams, lookalike domains, and prompt injection before creating a PayPal order.',
+      sampleArgs: {
+        rawText:
+          'Invoice #INV-2094 from billing@design-studio.io for Q4 Brand Guidelines: $185.00 USD via PayPal.',
+        claimedAmountCents: 18500,
+        payeeIdentifier: 'billing@design-studio.io',
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          rawText: { type: 'string' },
+          claimedAmountCents: { type: 'integer' },
+          payeeIdentifier: { type: 'string' },
+        },
+        required: ['rawText'],
+      },
+    },
+    {
+      name: 'aegispay_payrevive_recover',
+      category: 'Recover & Retain',
+      description:
+        'Diagnose any failed payment via Newton GBDT + Exact TreeSHAP + Disjoint LinUCB + Compliance Gate and execute PayPal recovery if profitable and compliant.',
+      sampleArgs: {
+        naturalDescription:
+          'Customer elena@studio.io had a $149.00 renewal decline due to insufficient funds 3 days before Friday payday, 92% historical capture rate, PayPal backup wallet linked.',
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          naturalDescription: { type: 'string' },
+          presetId: { type: 'string' },
+          amountCents: { type: 'integer' },
+          declineCode: { type: 'string' },
+          daysUntilPayday: { type: 'integer' },
+        },
+      },
+    },
+    {
+      name: 'aegispay_cliprefund_evaluate',
+      category: 'Recover & Retain',
+      description:
+        'Evaluate a customer damaged-delivery claim in natural language and issue an instant Keep-the-Item partial PayPal refund.',
+      sampleArgs: {
+        naturalDescription:
+          'Customer ordered a $68.00 Brushed Aluminum Laptop Stand. Arrived with a visible scratch on the base plate, still holds the laptop fine.',
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          naturalDescription: { type: 'string' },
+          itemTitle: { type: 'string' },
+          originalOrderCents: { type: 'integer' },
+          customerNote: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'aegispay_churnrescue_intercept',
+      category: 'Recover & Retain',
+      description:
+        'Analyze a subscriber cancellation message or email, enforce the legal/chargeback escalation circuit breaker, and issue a right-sized PayPal retention offer.',
+      sampleArgs: {
+        naturalDescription:
+          'Subscriber Maya Lin on the $89/mo Growth Plan (32% seat utilization) wrote: Budget is tight this quarter so we need to cancel our subscription.',
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          naturalDescription: { type: 'string' },
+          customerName: { type: 'string' },
+          planName: { type: 'string' },
+          currentPlanPriceCents: { type: 'integer' },
+          customerMessage: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'aegispay_paystream_create_plan',
+      category: 'Get Paid',
+      description:
+        'Decompose any freelance or B2B project brief into penny-exact PayPal milestones and collaborator payout splits with zero rounding drift.',
+      sampleArgs: {
+        naturalDescription:
+          'Build a $3,200 AI Analytics Dashboard for client@acme-ventures.io with Lead Engineer Alex (60%) and UI Designer Priya (40%).',
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          naturalDescription: { type: 'string' },
+          projectTitle: { type: 'string' },
+          projectBrief: { type: 'string' },
+          clientEmail: { type: 'string' },
+          totalBudgetCents: { type: 'integer' },
+        },
+      },
+    },
+    {
+      name: 'aegispay_paystream_issue_invoice',
+      category: 'Get Paid',
+      description:
+        'Issue and send a live PayPal Sandbox Invoice (INV2-...) for a specific milestone in a PayStream plan.',
+      sampleArgs: { milestoneId: 'MS-1' },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          planId: { type: 'string' },
+          milestoneId: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'aegispay_dealforge_negotiate',
+      category: 'Get Paid',
+      description:
+        'Negotiate a vendor quote against buyer/seller mandates and generate a signed SHA-256 contract + PayPal deposit invoice.',
+      sampleArgs: {
+        naturalDescription:
+          'Vendor CloudSec Partners quoted $1,100 for a SOC2 Penetration Test (min floor $680, 4 days delivery). Our target price is $650 and max budget is $840.',
+      },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          naturalDescription: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'aegispay_universal_ingest',
+      category: 'Universal Agent',
+      description:
+        '1-Click Universal Agentic Ingestion: pass any raw invoice, email, statement, failed payment log, damage claim, cancel email, SOW, or vendor quote and let AegisPay classify and execute the right action automatically.',
+      sampleArgs: {
+        rawText:
+          'Invoice #9482 from payments@nordic-cloud.io for Dedicated GPU Node: $140.00 USD due via PayPal Checkout.',
+      },
+      inputSchema: {
+        type: 'object',
+        properties: { rawText: { type: 'string' } },
+        required: ['rawText'],
+      },
+    },
+  ];
+
+  async function executeMcpToolCall(
+    ws: TenantWorkspace,
+    rawToolName: string,
+    args: Record<string, unknown>
+  ): Promise<unknown> {
+    const ALIAS_MAP: Record<string, string> = {
+      aegis_universal_agent_ingest: 'aegispay_universal_ingest',
+      aegis_scan_invoice: 'aegispay_scamshield_review',
+      aegis_evaluate_agent_purchase: 'aegispay_agent_pay',
+      aegis_check_affordability: 'aegispay_check_cashflow',
+      aegis_audit_subscriptions: 'aegispay_audit_subscriptions',
+      aegis_add_or_import_subscriptions: 'aegispay_audit_subscriptions',
+      aegis_recover_declined_payment: 'aegispay_payrevive_recover',
+      aegis_negotiate_vendor_deal: 'aegispay_dealforge_negotiate',
+      aegis_evaluate_damage_refund: 'aegispay_cliprefund_evaluate',
+      aegis_save_canceling_subscriber: 'aegispay_churnrescue_intercept',
+      aegis_create_milestone_plan: 'aegispay_paystream_create_plan',
+      aegis_verify_milestone_proof: 'aegispay_paystream_issue_invoice',
+      aegis_get_audit_ledger: 'aegispay_list_permits',
+    };
+    const toolName = ALIAS_MAP[rawToolName] || rawToolName;
+
+    if (toolName === 'aegispay_list_permits') {
+      return ws.agentPermits;
+    }
+
+    if (toolName === 'aegispay_check_cashflow') {
+      if (typeof args.query === 'string' && args.query.trim()) {
+        const parsed = await geminiEngine.parseNaturalCashflowQuery({
+          query: args.query,
+          currentBalanceCents: ws.currentCheckingBalanceCents,
+          minimumSafetyBufferCents: ws.minimumSafetyBufferCents,
+        });
+        const evalRes = evaluateCashflowAffordability({
+          itemTitle: parsed.itemTitle,
+          proposedSpendCents: parsed.proposedSpendCents,
+          currentBalanceCents: parsed.updatedBalanceCents ?? ws.currentCheckingBalanceCents,
+          commitments: ws.cashflowCommitments,
+          minimumSafetyBufferCents:
+            parsed.updatedSafetyBufferCents ?? ws.minimumSafetyBufferCents,
+        });
+        const aiAdvisor = await geminiEngine.adviseCashflowAffordability({
+          itemTitle: evalRes.itemTitle,
+          proposedSpendCents: evalRes.proposedSpendCents,
+          trueFreeCashflowCents: evalRes.trueFreeCashflowCents,
+          postPurchaseFreeCashflowCents: evalRes.postPurchaseFreeCashflowCents,
+          verdict: evalRes.verdict,
+        });
+        return { result: evalRes, parsedQuery: parsed, evaluation: evalRes, aiAdvisor };
+      }
+      const spend = Math.max(100, Math.round(Number(args.proposedSpendCents) || 58000));
+      const evalRes = evaluateCashflowAffordability({
+        itemTitle: String(args.itemTitle || 'MCP Cashflow Evaluation'),
+        proposedSpendCents: spend,
+        currentBalanceCents: ws.currentCheckingBalanceCents,
+        commitments: ws.cashflowCommitments,
+        minimumSafetyBufferCents: ws.minimumSafetyBufferCents,
+      });
+      return { result: evalRes, ...evalRes };
+    }
+
+    if (toolName === 'aegispay_audit_subscriptions') {
+      const action = String(
+        args.action || (args.rawText ? 'IMPORT_TEXT' : args.autoCleanAll ? 'CLEAN_ALL' : 'AUDIT')
+      ).toUpperCase();
+      if (action === 'SYNC_PAYPAL') {
+        const syncRes = await paypalGateway.discoverRecurringFromPayPalSandbox(ws.tenantId);
+        for (const item of syncRes.discovered) {
+          if (!ws.billingPermissions.some((p) => p.agreementId === item.agreementId)) {
+            ws.billingPermissions.unshift(item);
+          }
+        }
+        syncAutopayCommitment(ws);
+        store.scheduleFlush();
+        return {
+          synced: syncRes,
+          zombieReport: auditPayPalPermissions(ws.billingPermissions),
+        };
+      }
+      if (action === 'IMPORT_TEXT' && typeof args.rawText === 'string') {
+        const parsed = await geminiEngine.parseSubscriptionsFromInput({ rawText: args.rawText });
+        for (const item of parsed.subscriptions) {
+          ws.billingPermissions.unshift(item);
+        }
+        syncAutopayCommitment(ws);
+        store.scheduleFlush();
+        return {
+          importedCount: parsed.subscriptions.length,
+          zombieReport: auditPayPalPermissions(ws.billingPermissions),
+        };
+      }
+      if (action === 'CLEAN_ALL') {
+        const report = auditPayPalPermissions(ws.billingPermissions);
+        let revoked = 0;
+        let tightened = 0;
+        for (const f of report.audits) {
+          const perm = ws.billingPermissions.find((p) => p.agreementId === f.agreementId);
+          if (!perm || perm.status !== 'ACTIVE') continue;
+          if (f.recommendedAction === 'REVOKE_IMMEDIATELY') {
+            perm.status = 'REVOKED';
+            revoked++;
+          } else if (f.recommendedAction === 'TIGHTEN_CAP') {
+            perm.monthlyCapCents = Math.ceil((perm.averageChargeCents * 1.1) / 100) * 100;
+            tightened++;
+          }
+        }
+        syncAutopayCommitment(ws);
+        store.scheduleFlush();
+        return {
+          revoked,
+          tightened,
+          zombieReport: auditPayPalPermissions(ws.billingPermissions),
+        };
+      }
+      return {
+        billingPermissions: ws.billingPermissions,
+        zombieReport: auditPayPalPermissions(ws.billingPermissions),
+      };
+    }
+
+    if (toolName === 'aegispay_compile_spending_rule') {
+      const sentence = String(
+        args.sentence || 'Allow up to $150 per order, auto-approve under $60 at 88% confidence.'
+      );
+      const compiled = await geminiEngine.compileNaturalLanguagePermitRule(sentence);
+      return { compiled };
+    }
+
+    if (toolName === 'aegispay_agent_pay') {
+      const permit = ws.agentPermits[0];
+      const numericAmount = Math.round(Number(args.amountCents) || 4500);
+      const evaluation = evaluateAgentPermit(permit, {
+        requestId: `MCP-REQ-${Date.now()}`,
+        permitId: permit.permitId,
+        amountCents: numericAmount,
+        currency: 'USD',
+        merchantId: String(args.merchantId || 'merch_mcp_verified'),
+        merchantName: String(args.merchantName || 'Verified Cloud Vendor'),
+        category: String(args.category || 'CLOUD'),
+        itemDescription: String(args.itemDescription || 'Autonomous MCP Purchase'),
+        aiConfidenceScore: Number(args.aiConfidenceScore ?? 0.92),
+        aiSuggestedVerdict: 'ALLOW',
+        aiReasoning: 'Evaluated via AegisPay MCP Server.',
+      });
+      let paypalOrder = null;
+      if (evaluation.finalVerdict !== 'BLOCK') {
+        paypalOrder = await paypalGateway.createOrder({
+          ownerTenantId: ws.tenantId,
+          intent: evaluation.paypalIntent === 'CAPTURE' ? 'CAPTURE' : 'AUTHORIZE',
+          amountCents: numericAmount,
+          currency: 'USD',
+          merchantName: String(args.merchantName || 'Verified Cloud Vendor'),
+          description: `[MCP Agent] ${args.itemDescription || 'Purchase'}`,
+          customHash: evaluation.auditHash,
+          idempotencyKey: evaluation.auditHash,
+          pillar: 'LUPAPERMIT',
+          autoExecuteInSandbox: true,
+        });
+      }
+      return { evaluation, paypalOrder };
+    }
+
+    if (toolName === 'aegispay_scamshield_review') {
+      const text = String(args.rawText || 'Invoice #1049 for UI Design: $45.00 USD');
+      const fx = await getLiveOrFallbackFxRates();
+      const extracted = extractPaymentRequestMetadata(text, fx.rates);
+      const amount = Math.max(
+        100,
+        Math.round(Number(args.claimedAmountCents) || extracted.convertedUsdCents || 4500)
+      );
+      const payee = String(
+        args.payeeIdentifier || extracted.detectedPayee || 'billing@verified-studio.io'
+      );
+      const detResult = evaluatePaymentScamDeterministically({
+        rawText: text,
+        claimedAmountCents: amount,
+        currency: 'USD',
+        payeeIdentifier: payee,
+      });
+      const aiResult = await geminiEngine.analyzePaymentScamSemantics({
+        sanitizedText: detResult.sanitizedText,
+        claimedAmountCents: amount,
+        payeeIdentifier: payee,
+      });
+      const finalVerdict = stricterVerdict(
+        detResult.deterministicVerdict,
+        aiResult.aiSuggestedVerdict
+      );
+      const combinedRiskScore = Math.max(detResult.riskScore, aiResult.semanticRiskScore);
+      const signedToken = getTenantScamVault(ws.tenantId).issueToken({
+        input: { rawText: text, claimedAmountCents: amount, currency: 'USD', payeeIdentifier: payee },
+        verdict: finalVerdict,
+        riskScore: combinedRiskScore,
+      });
+      return {
+        finalVerdict,
+        combinedRiskScore,
+        aiSummary: aiResult.aiSummary,
+        signedToken,
+      };
+    }
+
+    if (toolName === 'aegispay_payrevive_recover') {
+      let event: FailedPaymentEvent = PAYREVIVE_SAMPLE_EVENTS[0].event;
+      if (typeof args.naturalDescription === 'string' && args.naturalDescription.trim()) {
+        const parsed = await geminiEngine.parseNaturalFailedPayment({
+          description: args.naturalDescription,
+        });
+        event = parsed.event;
+      } else if (typeof args.presetId === 'string') {
+        const found = PAYREVIVE_SAMPLE_EVENTS.find((p) => p.presetId === args.presetId);
+        if (found) event = found.event;
+      }
+      const bandit = getTenantBandit(ws);
+      const decision = bandit.evaluateAndDecide(event);
+      store.recordPayReviveDecision(ws, decision);
+      return { decision, paypalOrder: null, paypalInvoice: null };
+    }
+
+    if (toolName === 'aegispay_cliprefund_evaluate') {
+      let itemTitle = String(args.itemTitle || 'Brushed Aluminum Laptop Stand');
+      let originalOrderCents = Math.max(500, Math.round(Number(args.originalOrderCents) || 6800));
+      let customerNote = String(
+        args.customerNote || 'Arrived with a visible scratch on the base plate.'
+      );
+      if (typeof args.naturalDescription === 'string' && args.naturalDescription.trim()) {
+        const parsed = await geminiEngine.parseNaturalDamageClaim({
+          description: args.naturalDescription,
+        });
+        itemTitle = parsed.itemTitle;
+        originalOrderCents = parsed.originalOrderCents;
+        customerNote = parsed.customerNote;
+      }
+      const visionResult = await geminiEngine.extractVisionDefectTelemetry({
+        itemTitle,
+        customerNote,
+      });
+      const calculation = calculateDeterministicVisionRefund({
+        orderId: 'PAYPAL-SBX-8F92A1C4E7B01',
+        captureId: 'SIMCAP-8F92A1C4E7B01',
+        originalOrderCents,
+        imageSha256: sha256Hex(`${itemTitle}_${customerNote}_${Date.now()}`),
+        previouslyClaimedImageHashes: new Set(),
+        previouslyRefundedCentsOnCapture: 0,
+        telemetry: visionResult.telemetry,
+        policy: ws.merchantPolicy || DEFAULT_MERCHANT_REFUND_POLICY,
+      });
+      return { visionTelemetry: visionResult.telemetry, calculation };
+    }
+
+    if (toolName === 'aegispay_churnrescue_intercept') {
+      let ctx = {
+        accountId: String(args.accountId || 'ACC-MCP-901'),
+        customerName: String(args.customerName || 'Jordan Vance'),
+        planName: String(args.planName || 'Cloud Pro Plan'),
+        currentPlanPriceCents: Math.max(1000, Math.round(Number(args.currentPlanPriceCents) || 9900)),
+        featureUtilizationPct: 34,
+        negotiationStep: 1,
+        paypalDeclineCode: 'VOLUNTARY_CANCEL_CLICK' as const,
+        customerMessage: String(
+          args.customerMessage || 'Thinking of canceling because $99/mo is too expensive.'
+        ),
+      };
+      if (typeof args.naturalDescription === 'string' && args.naturalDescription.trim()) {
+        const parsed = await geminiEngine.parseNaturalChurnContext({
+          description: args.naturalDescription,
+        });
+        ctx = {
+          ...ctx,
+          customerName: parsed.customerName,
+          planName: parsed.planName,
+          currentPlanPriceCents: parsed.currentPlanPriceCents,
+          featureUtilizationPct: parsed.featureUtilizationPct,
+          negotiationStep: parsed.negotiationStep,
+          customerMessage: parsed.customerMessage,
+        };
+      }
+      const decision = evaluateChurnIntervention(ctx);
+      const empathy = await geminiEngine.generateEmpatheticRetentionResponse(ctx, decision);
+      return { context: ctx, decision, agentReply: empathy.agentReply };
+    }
+
+    if (toolName === 'aegispay_paystream_create_plan') {
+      let projectTitle = String(args.projectTitle || 'Client Web & Payment Build');
+      let projectBrief = String(
+        args.projectBrief || 'Design, build, test, and launch web application with PayPal checkout.'
+      );
+      let clientEmail = String(args.clientEmail || 'client-treasury@personal.example.com');
+      let totalBudgetCents = Math.max(1000, Math.round(Number(args.totalBudgetCents) || 245000));
+      let collaborators: CollaboratorShareInput[] = [];
+
+      if (typeof args.naturalDescription === 'string' && args.naturalDescription.trim()) {
+        const parsed = await geminiEngine.parseNaturalProjectBrief({
+          description: args.naturalDescription,
+        });
+        projectTitle = parsed.projectTitle;
+        projectBrief = parsed.projectBrief;
+        clientEmail = parsed.clientEmail;
+        totalBudgetCents = parsed.totalBudgetCents;
+        collaborators = parsed.collaborators;
+      }
+
+      const aiScope = await geminiEngine.architectSmartMilestones({
+        projectBrief: `${projectTitle}: ${projectBrief}`,
+        totalBudgetCents,
+      });
+      const plan = computePennyExactMilestonePlan({
+        projectTitle,
+        clientEmail,
+        totalBudgetCents,
+        proposals: aiScope.proposals,
+        collaborators,
+      });
+      ws.milestonePlans.unshift(plan);
+      store.scheduleFlush();
+      return { plan, aiSummary: aiScope.aiSummary };
+    }
+
+    if (toolName === 'aegispay_paystream_issue_invoice') {
+      const plan =
+        ws.milestonePlans.find((p) => p.planId === String(args.planId || '')) ||
+        ws.milestonePlans[0];
+      if (!plan) throw new Error('No milestone plan found in workspace.');
+      const milestone =
+        plan.milestones.find((m) => m.milestoneId === String(args.milestoneId || '')) ||
+        plan.milestones[0];
+      const invoice = await paypalGateway.createLiveInvoice({
+        ownerTenantId: ws.tenantId,
+        title: `${plan.projectTitle} - ${milestone.title}`,
+        note: `Deliverables: ${milestone.acceptanceCriteria.join('; ')}`,
+        recipientEmail: plan.clientEmail,
+        amountCents: milestone.amountCents,
+        currency: plan.currency,
+        pillar: 'PAYSTREAM',
+        contractOrPlanHash: plan.planSha256,
+        sendImmediately: true,
+      });
+      milestone.paypalInvoiceId = invoice.invoiceId;
+      milestone.paypalInvoiceUrl = invoice.payerViewUrl;
+      milestone.status = 'INVOICED_ON_PAYPAL';
+      store.scheduleFlush();
+      return { invoice, milestone };
+    }
+
+    if (toolName === 'aegispay_dealforge_negotiate') {
+      const parsed = await geminiEngine.parseNaturalDealMandate({
+        description: String(
+          args.naturalDescription ||
+            'Vendor quoted $980 for Security Audit (floor $640). Buyer target $620, max budget $820.'
+        ),
+      });
+      const agreedPriceCents = Math.min(
+        parsed.maxPriceCents,
+        Math.max(
+          parsed.vendorFloorCents,
+          Math.round((parsed.targetPriceCents + parsed.maxPriceCents) / 2)
+        )
+      );
+      const contract = createSignedDealContract({
+        buyerMandate: {
+          mandateId: 'BM-MCP-01',
+          buyerName: 'Acme Studio (Buyer)',
+          itemTitle: parsed.dealTitle,
+          targetPriceCents: parsed.targetPriceCents,
+          maxPriceCents: parsed.maxPriceCents,
+          maxDeliveryDays: parsed.maxDeliveryDays,
+          minRevisions: parsed.minRevisions,
+          maxUpfrontDepositPct: parsed.maxUpfrontDepositPct,
+        },
+        sellerMandate: {
+          mandateId: 'SM-MCP-01',
+          sellerName: parsed.sellerName,
+          listPriceCents: parsed.vendorAskCents,
+          minPriceCents: parsed.vendorFloorCents,
+          fastestDeliveryDays: parsed.fastestDeliveryDays,
+          maxRevisionsAllowed: Math.max(parsed.minRevisions, 3),
+          minUpfrontDepositPct: 25,
+        },
+        agreedTerms: {
+          priceCents: agreedPriceCents,
+          deliveryDays: parsed.maxDeliveryDays,
+          revisions: parsed.minRevisions,
+          upfrontDepositPct: 30,
+        },
+      });
+      ws.signedContracts.unshift(contract);
+      store.scheduleFlush();
+      return { parsedMandates: parsed, contract };
+    }
+
+    if (toolName === 'aegispay_universal_ingest') {
+      return runUniversalAgentIngest(ws, {
+        rawText: String(args.rawText || ''),
+        autoExecute: true,
+      });
+    }
+
+    throw new Error(`Unknown MCP tool: ${rawToolName}`);
+  }
+
+  app.get('/api/mcp', readLimiter.middleware(), (req, res) => {
+    const isSecure =
+      req.secure ||
+      req.headers['x-forwarded-proto'] === 'https' ||
+      process.env.NODE_ENV === 'production';
+    const protocol = isSecure ? 'https' : 'http';
+    const host = req.headers.host || 'localhost:8787';
+    const baseUrl = `${protocol}://${host}`;
+
+    res.json({
+      status: 'ONLINE',
+      protocolVersion: '2024-11-05',
+      toolsCount: MCP_TOOLS_CATALOG.length,
+      transport: ['HTTP_JSON_RPC_2_0', 'STDIO_CLI', 'WEBMCP_BROWSER_BRIDGE'],
+      serverInfo: {
+        name: 'aegispay-paypal-mcp-server',
+        version: '3.2.0',
+        toolCount: MCP_TOOLS_CATALOG.length,
+      },
+      endpoints: {
+        httpJsonRpc: `${baseUrl}/api/mcp`,
+        stdioCommand: 'npm run mcp',
+        browserGlobal: 'window.aegisPayMcp.callTool(name, args)',
+      },
+      claudeDesktopConfig: {
+        mcpServers: {
+          aegispay: {
+            command: 'node',
+            args: [`${ROOT_DIR}/mcp-server/index.mjs`],
+            env: {
+              AEGISPAY_API_URL: baseUrl,
+            },
+          },
+        },
+      },
+      tools: MCP_TOOLS_CATALOG,
+    });
+  });
+
+  app.post('/api/mcp', mutationLimiter.middleware(), async (req, res) => {
+    const body = req.body || {};
+    const id = body.id ?? 1;
+    const method = String(body.method || (body.tool ? 'tools/call' : 'tools/list'));
+    const ws = resolveMcpOrDemoWorkspace(req);
+
+    try {
+      if (method === 'initialize') {
+        res.json({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            protocolVersion: '2024-11-05',
+            capabilities: { tools: {} },
+            serverInfo: { name: 'aegispay-paypal-mcp-server', version: '3.2.0' },
+          },
+        });
+        return;
+      }
+
+      if (method === 'ping') {
+        res.json({
+          jsonrpc: '2.0',
+          id,
+          result: { ok: true, status: 'ONLINE', timestampIso: new Date().toISOString() },
+        });
+        return;
+      }
+
+      if (method === 'tools/list') {
+        res.json({
+          jsonrpc: '2.0',
+          id,
+          result: { tools: MCP_TOOLS_CATALOG },
+        });
+        return;
+      }
+
+      if (method === 'tools/call') {
+        const toolName = String(body.params?.name || body.tool || '');
+        const toolArgs = (body.params?.arguments || body.arguments || {}) as Record<string, unknown>;
+        const output = await executeMcpToolCall(ws, toolName, toolArgs);
+
+        store.appendTenantAuditLog(ws, {
+          pillar: 'LUPAPERMIT',
+          actor: `MCP Agent (${toolName})`,
+          eventTitle: `Executed MCP Tool ${toolName}`,
+          verdict: 'ALLOW',
+          amountCents: 0,
+          savedOrProtectedCents: 0,
+          paypalRef: 'MCP-JSONRPC-2.0',
+          sha256Hash: sha256Hex({ toolName, toolArgs }),
+          deterministicRule: `Model Context Protocol v2024-11-05 JSON-RPC 2.0 Execution`,
+        });
+
+        res.json({
+          jsonrpc: '2.0',
+          id,
+          result: {
+            toolName,
+            executedAtIso: new Date().toISOString(),
+            data: output,
+            structuredContent: output,
+            content: [{ type: 'text', text: JSON.stringify(output, null, 2) }],
+          },
+        });
+        return;
+      }
+
+      res.status(400).json({
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32601, message: `Unsupported MCP method: ${method}` },
+      });
+    } catch (err) {
+      const msg = redactSecrets((err as Error).message);
+      const isUnknownTool = msg.includes('Unknown MCP tool');
+      res.status(400).json({
+        jsonrpc: '2.0',
+        id,
+        error: { code: isUnknownTool ? -32601 : -32000, message: msg },
+      });
+    }
+  });
+
   // ==========================================================================
   // MANDATORY AUTHENTICATION BARRIER FOR ALL PROTECTED /api/* ROUTES
   // ==========================================================================
@@ -1201,7 +2033,17 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const ws = getWorkspace(req);
       const body = req.body || {};
       const preset = PAYREVIVE_SAMPLE_EVENTS.find((p) => p.presetId === body.presetId);
-      const baseEvent = preset ? preset.event : PAYREVIVE_SAMPLE_EVENTS[0].event;
+      let baseEvent = preset ? preset.event : PAYREVIVE_SAMPLE_EVENTS[0].event;
+      let parsedNaturalInput: Awaited<
+        ReturnType<typeof geminiEngine.parseNaturalFailedPayment>
+      > | null = null;
+
+      if (typeof body.naturalDescription === 'string' && body.naturalDescription.trim()) {
+        parsedNaturalInput = await geminiEngine.parseNaturalFailedPayment({
+          description: body.naturalDescription,
+        });
+        baseEvent = parsedNaturalInput.event;
+      }
 
       const validDeclines: PaymentDeclineCode[] = [
         'INSUFFICIENT_FUNDS',
@@ -1216,7 +2058,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         : baseEvent.declineCode;
 
       const event: FailedPaymentEvent = {
-        eventId: String(body.eventId || `EVT-${Date.now().toString(36).toUpperCase()}`),
+        eventId: String(
+          body.eventId || baseEvent.eventId || `EVT-${Date.now().toString(36).toUpperCase()}`
+        ),
         customerEmail: String(body.customerEmail || baseEvent.customerEmail).trim(),
         merchantOrderRef: String(body.merchantOrderRef || baseEvent.merchantOrderRef).trim(),
         amountCents: Math.max(10, Math.round(Number(body.amountCents ?? baseEvent.amountCents))),
@@ -1300,8 +2144,6 @@ export function createAegisServer(options: AegisServerOptions = {}) {
             sendImmediately: true,
           });
         }
-        // NOTE: We intentionally do NOT call tenantBandit.updateOutcome(..., true) on invoice/order creation!
-        // Bandit arm weights update ONLY when actual payment settlement outcome is confirmed via /api/payrevive/confirm-settlement.
       }
 
       const auditVerdict: AuditLedgerRow['verdict'] =
@@ -1337,6 +2179,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
       res.json({
         decision,
+        parsedNaturalInput,
         paypalOrder,
         paypalInvoice,
         auditRow,
@@ -1420,6 +2263,13 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         store.scheduleFlush();
       }
 
+      const payIn4InstallmentCents = Math.ceil(result.proposedSpendCents / 4);
+      const payIn4Simulation = {
+        installmentCents: payIn4InstallmentCents,
+        firstInstallmentAffordable: result.trueFreeCashflowCents >= payIn4InstallmentCents,
+        postFirstInstallmentBufferCents: result.trueFreeCashflowCents - payIn4InstallmentCents,
+      };
+
       let aiAdvisor = null;
       if (includeAiAdvice) {
         aiAdvisor = await geminiEngine.adviseCashflowAffordability({
@@ -1443,7 +2293,118 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         deterministicRule: result.deterministicExplanation,
       });
 
-      res.json({ result, aiAdvisor, updatedPermit: ws.agentPermits[0] });
+      res.json({ result, payIn4Simulation, aiAdvisor, updatedPermit: ws.agentPermits[0] });
+    } catch (err) {
+      res.status(400).json({ error: redactSecrets((err as Error).message) });
+    }
+  });
+
+  app.post('/api/lupa/cashflow-natural', async (req, res) => {
+    try {
+      const ws = getWorkspace(req);
+      const { query, persistProfileUpdates, syncAgentPermitCap } = req.body || {};
+      const cleanQuery = String(query || '').trim();
+      if (!cleanQuery) {
+        res.status(400).json({ error: 'Provide a plain-English purchase affordability question.' });
+        return;
+      }
+
+      const parsed = await geminiEngine.parseNaturalCashflowQuery({
+        query: cleanQuery,
+        currentBalanceCents: ws.currentCheckingBalanceCents,
+        minimumSafetyBufferCents: ws.minimumSafetyBufferCents,
+      });
+
+      if (persistProfileUpdates !== false) {
+        if (typeof parsed.updatedBalanceCents === 'number' && parsed.updatedBalanceCents >= 0) {
+          ws.currentCheckingBalanceCents = parsed.updatedBalanceCents;
+        }
+        if (
+          typeof parsed.updatedSafetyBufferCents === 'number' &&
+          parsed.updatedSafetyBufferCents >= 0
+        ) {
+          ws.minimumSafetyBufferCents = parsed.updatedSafetyBufferCents;
+        }
+        if (Array.isArray(parsed.extractedCommitments) && parsed.extractedCommitments.length > 0) {
+          for (const c of parsed.extractedCommitments) {
+            const existingIdx = ws.cashflowCommitments.findIndex(
+              (existing) =>
+                existing.name.toLowerCase() === c.name.toLowerCase() ||
+                (c.category === 'RENT_MORTGAGE' && existing.category === 'RENT_MORTGAGE')
+            );
+            if (existingIdx >= 0) {
+              ws.cashflowCommitments[existingIdx].amountCents = c.amountCents;
+              ws.cashflowCommitments[existingIdx].dueInDays = c.dueInDays;
+            } else {
+              ws.cashflowCommitments.push({
+                id: `cf_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
+                name: c.name,
+                amountCents: c.amountCents,
+                dueInDays: c.dueInDays,
+                category: c.category,
+                mandatory: true,
+              });
+            }
+          }
+        }
+        store.scheduleFlush();
+      }
+
+      const result = evaluateCashflowAffordability({
+        itemTitle: parsed.itemTitle,
+        proposedSpendCents: parsed.proposedSpendCents,
+        currentBalanceCents: ws.currentCheckingBalanceCents,
+        commitments: ws.cashflowCommitments,
+        minimumSafetyBufferCents: ws.minimumSafetyBufferCents,
+      });
+
+      if (syncAgentPermitCap && ws.agentPermits[0]) {
+        ws.agentPermits[0].maxSingleTransactionCents = Math.max(
+          2000,
+          Math.min(100000, result.recommendedAgentCapCents)
+        );
+        store.scheduleFlush();
+      }
+
+      const payIn4InstallmentCents = Math.ceil(result.proposedSpendCents / 4);
+      const payIn4Simulation = {
+        installmentCents: payIn4InstallmentCents,
+        firstInstallmentAffordable: result.trueFreeCashflowCents >= payIn4InstallmentCents,
+        postFirstInstallmentBufferCents: result.trueFreeCashflowCents - payIn4InstallmentCents,
+      };
+
+      const aiAdvisor = await geminiEngine.adviseCashflowAffordability({
+        itemTitle: result.itemTitle,
+        proposedSpendCents: result.proposedSpendCents,
+        trueFreeCashflowCents: result.trueFreeCashflowCents,
+        postPurchaseFreeCashflowCents: result.postPurchaseFreeCashflowCents,
+        verdict: result.verdict,
+      });
+
+      const auditRow = appendAudit(req, {
+        pillar: 'LUPAPERMIT',
+        actor: 'Natural-Language Budget Guard',
+        eventTitle: `Natural Cashflow Check: "${result.itemTitle}" ($${(result.proposedSpendCents / 100).toFixed(2)}) -> ${result.verdict}`,
+        verdict: result.verdict,
+        amountCents: result.proposedSpendCents,
+        savedOrProtectedCents: result.verdict === 'ALLOW' ? 0 : result.proposedSpendCents,
+        paypalRef: 'CASHFLOW-NL-GUARD',
+        sha256Hash: sha256Hex({ cleanQuery, result }),
+        deterministicRule: result.deterministicExplanation,
+      });
+
+      res.json({
+        parsed,
+        parsedQuery: parsed,
+        result,
+        payIn4Simulation,
+        aiAdvisor,
+        currentCheckingBalanceCents: ws.currentCheckingBalanceCents,
+        minimumSafetyBufferCents: ws.minimumSafetyBufferCents,
+        cashflowCommitments: ws.cashflowCommitments,
+        updatedPermit: ws.agentPermits[0],
+        auditRow,
+      });
     } catch (err) {
       res.status(400).json({ error: redactSecrets((err as Error).message) });
     }
@@ -1651,6 +2612,26 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         pillar: 'LUPAPERMIT',
       });
 
+      if (!ws.billingPermissions.some((p) => p.agreementId === sub.subscriptionId)) {
+        ws.billingPermissions.unshift({
+          agreementId: sub.subscriptionId,
+          merchantName: sub.planName,
+          merchantId: `merch_${sub.subscriptionId.toLowerCase().slice(-6)}`,
+          category: 'SAAS',
+          status: 'ACTIVE',
+          createdDaysAgo: 1,
+          monthlyCapCents: Math.round(sub.monthlyPriceCents * 1.5),
+          averageChargeCents: sub.monthlyPriceCents,
+          previousChargeCents: sub.monthlyPriceCents,
+          lastChargedDaysAgo: 0,
+          lastUserInteractionDaysAgo: 0,
+          paypalApprovalUrl: sub.approvalUrl,
+          source: 'PAYPAL_SANDBOX_SYNC',
+        });
+        syncAutopayCommitment(ws);
+        store.scheduleFlush();
+      }
+
       const auditRow = appendAudit(req, {
         pillar: 'LUPAPERMIT',
         actor: 'PayPal Subscriptions Service',
@@ -1663,64 +2644,314 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         deterministicRule: `PayPal Catalog ${sub.productId} -> Plan ${sub.planId} -> Subscription ${sub.subscriptionId}`,
       });
 
-      res.json({ subscription: sub, auditRow });
+      res.json({
+        subscription: sub,
+        billingPermissions: ws.billingPermissions,
+        zombieReport: auditPayPalPermissions(ws.billingPermissions),
+        cashflowCommitments: ws.cashflowCommitments,
+        auditRow,
+      });
     } catch (err) {
       res.status(400).json({ error: redactSecrets((err as Error).message) });
     }
   });
 
-  app.post('/api/lupa/revoke-zombie', (req, res) => {
-    const ws = getWorkspace(req);
-    const { agreementId, action } = req.body || {};
-    const perm = ws.billingPermissions.find((p) => p.agreementId === agreementId);
-    if (!perm) {
-      res.status(404).json({ error: `Billing Agreement ${agreementId} not found` });
-      return;
-    }
+  app.post('/api/lupa/subscriptions/add', async (req, res) => {
+    try {
+      const ws = getWorkspace(req);
+      const {
+        rawText,
+        imageBase64,
+        imageMimeType,
+        merchantName,
+        category,
+        averageChargeCents,
+        monthlyCapCents,
+        previousChargeCents,
+        lastChargedDaysAgo,
+        lastUserInteractionDaysAgo,
+      } = req.body || {};
 
-    if (action === 'TIGHTEN_CAP') {
-      const oldCap = perm.monthlyCapCents;
-      perm.monthlyCapCents = Math.ceil((perm.averageChargeCents * 1.1) / 100) * 100;
-      appendAudit(req, {
-        pillar: 'LUPAPERMIT',
-        actor: 'Subscription Guard',
-        eventTitle: `Lowered Monthly Limit for ${perm.merchantName} ($${(oldCap / 100).toFixed(2)} -> $${(perm.monthlyCapCents / 100).toFixed(2)}/mo)`,
-        verdict: 'SETTLED',
-        amountCents: perm.monthlyCapCents,
-        savedOrProtectedCents: (oldCap - perm.monthlyCapCents) * 12,
-        paypalRef: perm.agreementId,
-        sha256Hash: sha256Hex({ agreementId, newCap: perm.monthlyCapCents }),
-        deterministicRule: 'Capped recurring merchant pull authority to 110% of trailing average charge',
-      });
-    } else {
-      perm.status = 'REVOKED';
-      const recoverable = perm.averageChargeCents * 12;
-      const autopayCommitment = ws.cashflowCommitments.find((c) => c.id === 'cf_paypal_subs');
-      if (autopayCommitment) {
-        autopayCommitment.amountCents = Math.max(
-          0,
-          autopayCommitment.amountCents - perm.averageChargeCents
-        );
+      const addedPermissions = [];
+
+      if ((typeof rawText === 'string' && rawText.trim()) || typeof imageBase64 === 'string') {
+        const parsed = await geminiEngine.parseSubscriptionsFromInput({
+          rawText: String(rawText || ''),
+          imageBase64: typeof imageBase64 === 'string' ? imageBase64 : undefined,
+          imageMimeType: typeof imageMimeType === 'string' ? imageMimeType : undefined,
+        });
+        for (const item of parsed.subscriptions) {
+          ws.billingPermissions.unshift(item);
+          addedPermissions.push(item);
+        }
+      } else if (merchantName) {
+        const avg = Math.max(100, Math.round(Number(averageChargeCents) || 2900));
+        const prev = Math.max(100, Math.round(Number(previousChargeCents) || avg));
+        const cap = Math.max(avg, Math.round(Number(monthlyCapCents) || Math.round(avg * 1.5)));
+        const validCategories = ['CLOUD', 'SAAS', 'ENTERTAINMENT', 'UTILITIES', 'SHOPPING', 'UNKNOWN'] as const;
+        const rawCat = String(category || 'SAAS').toUpperCase();
+        const normCategory = (validCategories as readonly string[]).includes(rawCat)
+          ? (rawCat as (typeof validCategories)[number])
+          : 'SAAS';
+        const customPerm = {
+          agreementId: `B-USER-${Date.now().toString(36).toUpperCase().slice(-6)}`,
+          merchantName: String(merchantName).slice(0, 72),
+          merchantId: `merch_${Date.now().toString(36).slice(-6)}`,
+          category: normCategory,
+          status: 'ACTIVE' as const,
+          createdDaysAgo: 90,
+          monthlyCapCents: cap,
+          averageChargeCents: avg,
+          previousChargeCents: prev,
+          lastChargedDaysAgo: Math.max(0, Math.round(Number(lastChargedDaysAgo ?? 14))),
+          lastUserInteractionDaysAgo: Math.max(
+            0,
+            Math.round(Number(lastUserInteractionDaysAgo ?? 95))
+          ),
+          source: 'USER_ADDED' as const,
+        };
+        ws.billingPermissions.unshift(customPerm);
+        addedPermissions.push(customPerm);
+      } else {
+        res.status(400).json({
+          error:
+            'Provide rawText (statement CSV/text), an imageBase64 screenshot, or merchantName + averageChargeCents.',
+        });
+        return;
       }
-      appendAudit(req, {
-        pillar: 'LUPAPERMIT',
-        actor: 'Subscription Guard',
-        eventTitle: `Canceled Unused Autopay ${perm.agreementId} (${perm.merchantName})`,
-        verdict: 'BLOCK',
-        amountCents: perm.averageChargeCents,
-        savedOrProtectedCents: recoverable,
-        paypalRef: perm.agreementId,
-        sha256Hash: sha256Hex({ agreementId, status: 'REVOKED' }),
-        deterministicRule: 'Revoked dormant recurring pull permission; freed monthly cashflow',
-      });
-    }
-    store.scheduleFlush();
 
-    res.json({
-      permission: perm,
-      zombieReport: auditPayPalPermissions(ws.billingPermissions),
-      cashflowCommitments: ws.cashflowCommitments,
-    });
+      syncAutopayCommitment(ws);
+      store.scheduleFlush();
+
+      const zombieReport = auditPayPalPermissions(ws.billingPermissions);
+      const flaggedCount = zombieReport.audits.filter((a) => a.isZombie).length;
+      const auditRow = appendAudit(req, {
+        pillar: 'LUPAPERMIT',
+        actor: 'Subscription Discovery Engine',
+        eventTitle: `Imported ${addedPermissions.length} Subscription(s) (${addedPermissions.map((p) => p.merchantName).join(', ')})`,
+        verdict: 'ALLOW',
+        amountCents: addedPermissions.reduce((acc, p) => acc + p.averageChargeCents, 0),
+        savedOrProtectedCents: zombieReport.totalAnnualExposureCents,
+        paypalRef: addedPermissions[0]?.agreementId || 'SUB-IMPORT',
+        sha256Hash: sha256Hex(addedPermissions),
+        deterministicRule: `Imported into recurring billing audit (${flaggedCount} flagged for cleanup)`,
+      });
+
+      res.json({
+        addedPermissions,
+        billingPermissions: ws.billingPermissions,
+        zombieReport,
+        cashflowCommitments: ws.cashflowCommitments,
+        auditRow,
+      });
+    } catch (err) {
+      res.status(400).json({ error: redactSecrets((err as Error).message) });
+    }
+  });
+
+  app.post('/api/lupa/subscriptions/sync-paypal', async (req, res) => {
+    try {
+      const ws = getWorkspace(req);
+      const syncRes = await paypalGateway.discoverRecurringFromPayPalSandbox(ws.tenantId);
+      let newlyMergedCount = 0;
+      for (const item of syncRes.discovered) {
+        const existing = ws.billingPermissions.find((p) => p.agreementId === item.agreementId);
+        if (existing) {
+          existing.status = item.status;
+          existing.paypalApprovalUrl = item.paypalApprovalUrl || existing.paypalApprovalUrl;
+          existing.source = 'PAYPAL_SANDBOX_SYNC';
+        } else {
+          ws.billingPermissions.unshift(item);
+          newlyMergedCount++;
+        }
+      }
+
+      syncAutopayCommitment(ws);
+      store.scheduleFlush();
+
+      const zombieReport = auditPayPalPermissions(ws.billingPermissions);
+      const auditRow = appendAudit(req, {
+        pillar: 'LUPAPERMIT',
+        actor: 'PayPal Sandbox Subscription Sync',
+        eventTitle: `Synced ${syncRes.discovered.length} PayPal Recurring Agreement(s) (${newlyMergedCount} newly added)`,
+        verdict: 'ALLOW',
+        amountCents: syncRes.discovered.reduce((acc, p) => acc + p.averageChargeCents, 0),
+        savedOrProtectedCents: 0,
+        paypalRef: syncRes.discovered[0]?.agreementId || 'PAYPAL-SYNC',
+        sha256Hash: sha256Hex(syncRes),
+        deterministicRule: `PayPal /v1/billing/subscriptions + /v1/reporting/transactions (${syncRes.mode})`,
+      });
+
+      res.json({
+        synced: syncRes,
+        newlyMergedCount,
+        billingPermissions: ws.billingPermissions,
+        zombieReport,
+        cashflowCommitments: ws.cashflowCommitments,
+        subscriptions: paypalGateway.getSubscriptions(ws.tenantId),
+        auditRow,
+      });
+    } catch (err) {
+      res.status(400).json({ error: redactSecrets((err as Error).message) });
+    }
+  });
+
+  app.post('/api/lupa/subscriptions/clean-all', async (req, res) => {
+    try {
+      const ws = getWorkspace(req);
+      const initialReport = auditPayPalPermissions(ws.billingPermissions);
+      let revokedCount = 0;
+      let tightenedCount = 0;
+      let monthlySavedCents = 0;
+      let capReducedMonthlyCents = 0;
+
+      for (const flagged of initialReport.audits.filter((a) => a.isZombie)) {
+        const perm = ws.billingPermissions.find((p) => p.agreementId === flagged.agreementId);
+        if (!perm || perm.status !== 'ACTIVE') continue;
+
+        if (flagged.recommendedAction === 'REVOKE_IMMEDIATELY') {
+          if (perm.agreementId.startsWith('I-')) {
+            await paypalGateway.cancelLiveSubscription({
+              ownerTenantId: ws.tenantId,
+              subscriptionId: perm.agreementId,
+              reason: 'Auto-cleaned by AegisPay Subscription Guard',
+            });
+          }
+          perm.status = 'REVOKED';
+          revokedCount++;
+          monthlySavedCents += perm.averageChargeCents;
+        } else if (flagged.recommendedAction === 'TIGHTEN_CAP') {
+          const oldCap = perm.monthlyCapCents;
+          const newCap = Math.ceil((perm.averageChargeCents * 1.1) / 100) * 100;
+          if (newCap < oldCap) {
+            perm.monthlyCapCents = newCap;
+            tightenedCount++;
+            capReducedMonthlyCents += oldCap - newCap;
+          }
+        }
+      }
+
+      syncAutopayCommitment(ws);
+      store.scheduleFlush();
+
+      const updatedReport = auditPayPalPermissions(ws.billingPermissions);
+      const annualSavedCents = monthlySavedCents * 12;
+
+      const auditRow = appendAudit(req, {
+        pillar: 'LUPAPERMIT',
+        actor: 'Autonomous Subscription Cleaner',
+        eventTitle: `1-Click Cleanup: Canceled ${revokedCount} Unused Autopay(s) & Lowered ${tightenedCount} Limit(s) (Saved $${(monthlySavedCents / 100).toFixed(2)}/mo)`,
+        verdict: 'SETTLED',
+        amountCents: monthlySavedCents,
+        savedOrProtectedCents: annualSavedCents + capReducedMonthlyCents * 12,
+        paypalRef: `CLEANUP-${revokedCount}R-${tightenedCount}T`,
+        sha256Hash: sha256Hex({ revokedCount, tightenedCount, monthlySavedCents }),
+        deterministicRule:
+          'Batch revoked dormant/hiked billing agreements and tightened excess pull caps to 110% of average charge',
+      });
+
+      res.json({
+        revokedCount,
+        tightenedCount,
+        monthlySavedCents,
+        annualSavedCents,
+        capReducedMonthlyCents,
+        billingPermissions: ws.billingPermissions,
+        zombieReport: updatedReport,
+        cashflowCommitments: ws.cashflowCommitments,
+        auditRow,
+      });
+    } catch (err) {
+      res.status(400).json({ error: redactSecrets((err as Error).message) });
+    }
+  });
+
+  app.post('/api/lupa/revoke-zombie', async (req, res) => {
+    try {
+      const ws = getWorkspace(req);
+      const { agreementId, action } = req.body || {};
+      const permIdx = ws.billingPermissions.findIndex((p) => p.agreementId === agreementId);
+      if (permIdx === -1) {
+        res.status(404).json({ error: `Billing Agreement ${agreementId} not found` });
+        return;
+      }
+      const perm = ws.billingPermissions[permIdx];
+
+      if (action === 'DELETE') {
+        ws.billingPermissions.splice(permIdx, 1);
+        syncAutopayCommitment(ws);
+        store.scheduleFlush();
+        res.json({
+          deleted: true,
+          billingPermissions: ws.billingPermissions,
+          zombieReport: auditPayPalPermissions(ws.billingPermissions),
+          cashflowCommitments: ws.cashflowCommitments,
+        });
+        return;
+      }
+
+      if (action === 'RESTORE') {
+        perm.status = 'ACTIVE';
+        syncAutopayCommitment(ws);
+        store.scheduleFlush();
+        res.json({
+          permission: perm,
+          billingPermissions: ws.billingPermissions,
+          zombieReport: auditPayPalPermissions(ws.billingPermissions),
+          cashflowCommitments: ws.cashflowCommitments,
+        });
+        return;
+      }
+
+      if (action === 'TIGHTEN_CAP') {
+        const oldCap = perm.monthlyCapCents;
+        perm.monthlyCapCents = Math.ceil((perm.averageChargeCents * 1.1) / 100) * 100;
+        appendAudit(req, {
+          pillar: 'LUPAPERMIT',
+          actor: 'Subscription Guard',
+          eventTitle: `Lowered Monthly Limit for ${perm.merchantName} ($${(oldCap / 100).toFixed(2)} -> $${(perm.monthlyCapCents / 100).toFixed(2)}/mo)`,
+          verdict: 'SETTLED',
+          amountCents: perm.monthlyCapCents,
+          savedOrProtectedCents: (oldCap - perm.monthlyCapCents) * 12,
+          paypalRef: perm.agreementId,
+          sha256Hash: sha256Hex({ agreementId, newCap: perm.monthlyCapCents }),
+          deterministicRule:
+            'Capped recurring merchant pull authority to 110% of trailing average charge',
+        });
+      } else {
+        if (perm.agreementId.startsWith('I-')) {
+          await paypalGateway.cancelLiveSubscription({
+            ownerTenantId: ws.tenantId,
+            subscriptionId: perm.agreementId,
+            reason: 'Canceled by account owner in AegisPay',
+          });
+        }
+        perm.status = 'REVOKED';
+        const recoverable = perm.averageChargeCents * 12;
+        syncAutopayCommitment(ws);
+        appendAudit(req, {
+          pillar: 'LUPAPERMIT',
+          actor: 'Subscription Guard',
+          eventTitle: `Canceled Unused Autopay ${perm.agreementId} (${perm.merchantName})`,
+          verdict: 'BLOCK',
+          amountCents: perm.averageChargeCents,
+          savedOrProtectedCents: recoverable,
+          paypalRef: perm.agreementId,
+          sha256Hash: sha256Hex({ agreementId, status: 'REVOKED' }),
+          deterministicRule: 'Revoked dormant recurring pull permission; freed monthly cashflow',
+        });
+      }
+      store.scheduleFlush();
+
+      res.json({
+        permission: perm,
+        billingPermissions: ws.billingPermissions,
+        zombieReport: auditPayPalPermissions(ws.billingPermissions),
+        cashflowCommitments: ws.cashflowCommitments,
+      });
+    } catch (err) {
+      res.status(400).json({ error: redactSecrets((err as Error).message) });
+    }
   });
 
   app.post('/api/lupa/agent-pay', async (req, res) => {
@@ -2141,6 +3372,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     try {
       const ws = getWorkspace(req);
       const {
+        naturalDescription,
         buyerMandate: rawBuyer,
         sellerMandate: rawSeller,
         simulatePromptInjection,
@@ -2149,25 +3381,58 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         buyerEmail,
       } = req.body || {};
 
+      let parsedNaturalInput: Awaited<
+        ReturnType<typeof geminiEngine.parseNaturalDealMandate>
+      > | null = null;
+      if (typeof naturalDescription === 'string' && naturalDescription.trim()) {
+        parsedNaturalInput = await geminiEngine.parseNaturalDealMandate({
+          description: naturalDescription,
+        });
+      }
+
       const buyerMandate: BuyerMandate = {
         mandateId: 'BM-LIVE-01',
         buyerName: String(rawBuyer?.buyerName || 'Acme Studio (Buyer)'),
-        itemTitle: String(rawBuyer?.itemTitle || 'Security & Infrastructure Audit'),
-        targetPriceCents: Math.round(Number(rawBuyer?.targetPriceCents) || 62000),
-        maxPriceCents: Math.round(Number(rawBuyer?.maxPriceCents) || 82000),
-        maxDeliveryDays: Math.round(Number(rawBuyer?.maxDeliveryDays) || 7),
-        minRevisions: Math.round(Number(rawBuyer?.minRevisions) || 2),
-        maxUpfrontDepositPct: Math.round(Number(rawBuyer?.maxUpfrontDepositPct) || 40),
+        itemTitle: String(
+          rawBuyer?.itemTitle ||
+            parsedNaturalInput?.dealTitle ||
+            'Security & Infrastructure Audit'
+        ),
+        targetPriceCents: Math.round(
+          Number(rawBuyer?.targetPriceCents ?? parsedNaturalInput?.targetPriceCents) || 62000
+        ),
+        maxPriceCents: Math.round(
+          Number(rawBuyer?.maxPriceCents ?? parsedNaturalInput?.maxPriceCents) || 82000
+        ),
+        maxDeliveryDays: Math.round(
+          Number(rawBuyer?.maxDeliveryDays ?? parsedNaturalInput?.maxDeliveryDays) || 7
+        ),
+        minRevisions: Math.round(
+          Number(rawBuyer?.minRevisions ?? parsedNaturalInput?.minRevisions) || 2
+        ),
+        maxUpfrontDepositPct: Math.round(
+          Number(rawBuyer?.maxUpfrontDepositPct ?? parsedNaturalInput?.maxUpfrontDepositPct) || 40
+        ),
       };
 
       const sellerMandate: SellerMandate = {
         mandateId: 'SM-LIVE-01',
-        sellerName: String(rawSeller?.sellerName || 'Sentinel Partners (Vendor)'),
-        listPriceCents: Math.round(Number(rawSeller?.listPriceCents) || 98000),
-        minPriceCents: Math.round(Number(rawSeller?.minPriceCents) || 64000),
-        fastestDeliveryDays: Math.round(Number(rawSeller?.fastestDeliveryDays) || 4),
-        maxRevisionsAllowed: Math.round(Number(rawSeller?.maxRevisionsAllowed) || 3),
-        minUpfrontDepositPct: Math.round(Number(rawSeller?.minUpfrontDepositPct) || 25),
+        sellerName: String(
+          rawSeller?.sellerName ||
+            parsedNaturalInput?.sellerName ||
+            'Sentinel Partners (Vendor)'
+        ),
+        listPriceCents: Math.round(
+          Number(rawSeller?.listPriceCents ?? parsedNaturalInput?.vendorAskCents) || 98000
+        ),
+        minPriceCents: Math.round(
+          Number(rawSeller?.minPriceCents ?? parsedNaturalInput?.vendorFloorCents) || 64000
+        ),
+        fastestDeliveryDays: Math.round(
+          Number(rawSeller?.fastestDeliveryDays ?? parsedNaturalInput?.fastestDeliveryDays) || 4
+        ),
+        maxRevisionsAllowed: Math.round(Number(rawSeller?.maxRevisionsAllowed ?? 3) || 3),
+        minUpfrontDepositPct: Math.round(Number(rawSeller?.minUpfrontDepositPct ?? 25) || 25),
       };
 
       const rounds: NegotiationRoundEntry[] = [];
@@ -2187,6 +3452,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         });
         res.json({
           dealReached: false,
+          parsedNaturalInput,
+          buyerMandate,
+          sellerMandate,
           reason: `No agreement possible: Your maximum budget ($${(buyerMandate.maxPriceCents / 100).toFixed(2)}) is below the vendor's minimum floor ($${(sellerMandate.minPriceCents / 100).toFixed(2)}).`,
           rounds,
           zopaAnalysis: {
@@ -2404,6 +3672,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
       res.json({
         dealReached: true,
+        parsedNaturalInput,
+        buyerMandate,
+        sellerMandate,
         rounds,
         contract,
         contractIntegrityVerified: verifyContractIntegrity(contract),
@@ -2488,6 +3759,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       if (!ws.refundedCentsByCapture) ws.refundedCentsByCapture = {};
 
       const {
+        naturalDescription,
         presetId,
         orderId,
         itemTitle,
@@ -2499,18 +3771,39 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         merchantPolicyOverride,
       } = req.body || {};
 
+      let parsedNaturalInput: Awaited<
+        ReturnType<typeof geminiEngine.parseNaturalDamageClaim>
+      > | null = null;
+      if (typeof naturalDescription === 'string' && naturalDescription.trim()) {
+        parsedNaturalInput = await geminiEngine.parseNaturalDamageClaim({
+          description: naturalDescription,
+        });
+      }
+
+      const resolvedItemTitle = String(
+        itemTitle || parsedNaturalInput?.itemTitle || 'Handcrafted Stoneware Espresso Mug'
+      );
+      const resolvedNote = String(
+        customerNote || parsedNaturalInput?.customerNote || 'Arrived with a chip on the upper rim.'
+      );
+      const orderCents = Math.max(
+        500,
+        Math.round(Number(originalOrderCents ?? parsedNaturalInput?.originalOrderCents) || 2800)
+      );
+      const effectivePresetId =
+        parsedNaturalInput && !presetId ? undefined : presetId ? String(presetId) : undefined;
+
       const targetOrderId = String(orderId || 'PAYPAL-SBX-8F92A1C4E7B01');
       const existingOrder = paypalGateway.getOrder(targetOrderId, ws.tenantId);
       const targetCaptureId =
         existingOrder?.captureId || `SIMCAP-${targetOrderId.replace('PAYPAL-SBX-', '')}`;
-      const orderCents = Math.max(500, Math.round(Number(originalOrderCents) || 2800));
 
       const claimedSet = new Set<string>(ws.claimedVisionImageHashes);
       const imageSeed = simulateReplayAttack
         ? 'REPLAY_IMAGE_STATIC_DIGEST'
         : imageBase64
           ? `${imageBase64.slice(0, 512)}_${Date.now()}`
-          : `${presetId || 'chipped_ceramic_mug'}_${Date.now()}`;
+          : `${effectivePresetId || resolvedItemTitle}_${resolvedNote}_${Date.now()}`;
       const imageSha256 = sha256Hex(imageSeed);
 
       if (simulateReplayAttack) {
@@ -2518,9 +3811,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       }
 
       const visionResult = await geminiEngine.extractVisionDefectTelemetry({
-        presetId: presetId ? String(presetId) : undefined,
-        itemTitle: String(itemTitle || 'Handcrafted Stoneware Espresso Mug'),
-        customerNote: String(customerNote || 'Arrived with a chip on the upper rim.'),
+        presetId: effectivePresetId,
+        itemTitle: resolvedItemTitle,
+        customerNote: resolvedNote,
         imageBase64: typeof imageBase64 === 'string' ? imageBase64 : undefined,
         imageMimeType: typeof imageMimeType === 'string' ? imageMimeType : undefined,
       });
@@ -2596,6 +3889,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       });
 
       res.json({
+        parsedNaturalInput,
         visionTelemetry: visionResult.telemetry,
         visionEngineMode: visionResult.engineMode,
         failoverTelemetry: visionResult.failoverTelemetry,
@@ -2619,6 +3913,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const ws = getWorkspace(req);
       const atomicLedger = getTenantAtomicLedger(ws.tenantId);
       const {
+        naturalDescription,
         accountId,
         customerName,
         planName,
@@ -2631,19 +3926,44 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         createDiscountedSubscription,
       } = req.body || {};
 
+      let parsedNaturalInput: Awaited<
+        ReturnType<typeof geminiEngine.parseNaturalChurnContext>
+      > | null = null;
+      if (typeof naturalDescription === 'string' && naturalDescription.trim()) {
+        parsedNaturalInput = await geminiEngine.parseNaturalChurnContext({
+          description: naturalDescription,
+        });
+      }
+
       const ctx = {
         accountId: String(accountId || 'ACC-SAAS-9042'),
-        customerName: String(customerName || 'Jordan Vance'),
-        planName: String(planName || 'Cloud Pro Plan'),
-        currentPlanPriceCents: Math.max(1000, Math.round(Number(currentPlanPriceCents) || 9900)),
+        customerName: String(
+          customerName || parsedNaturalInput?.customerName || 'Jordan Vance'
+        ),
+        planName: String(planName || parsedNaturalInput?.planName || 'Cloud Pro Plan'),
+        currentPlanPriceCents: Math.max(
+          1000,
+          Math.round(
+            Number(currentPlanPriceCents ?? parsedNaturalInput?.currentPlanPriceCents) || 9900
+          )
+        ),
         featureUtilizationPct: Math.max(
           0,
-          Math.min(100, Math.round(Number(featureUtilizationPct ?? 34)))
+          Math.min(
+            100,
+            Math.round(
+              Number(featureUtilizationPct ?? parsedNaturalInput?.featureUtilizationPct ?? 34)
+            )
+          )
         ),
-        negotiationStep: Math.max(1, Math.round(Number(negotiationStep) || 1)),
+        negotiationStep: Math.max(
+          1,
+          Math.round(Number(negotiationStep ?? parsedNaturalInput?.negotiationStep) || 1)
+        ),
         paypalDeclineCode: paypalDeclineCode || 'VOLUNTARY_CANCEL_CLICK',
         customerMessage: String(
           customerMessage ||
+            parsedNaturalInput?.customerMessage ||
             'Our PayPal billing declined and $99/mo is too steep right now—thinking of canceling.'
         ),
       };
@@ -2770,6 +4090,8 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       });
 
       res.json({
+        parsedNaturalInput,
+        contextUsed: ctx,
         decision,
         agentReply: empathy.agentReply,
         engineMode: empathy.engineMode,
@@ -2792,24 +4114,52 @@ export function createAegisServer(options: AegisServerOptions = {}) {
   app.post('/api/paystream/create-plan', async (req, res) => {
     try {
       const ws = getWorkspace(req);
-      const { projectTitle, projectBrief, clientEmail, totalBudgetCents, collaborators } =
-        req.body || {};
+      const {
+        naturalDescription,
+        projectTitle,
+        projectBrief,
+        clientEmail,
+        totalBudgetCents,
+        collaborators,
+      } = req.body || {};
 
-      const budgetCents = Math.max(1000, Math.round(Number(totalBudgetCents) || 245000));
-      const cleanTitle = String(projectTitle || 'Client Web & Payment Build');
+      let parsedNaturalInput: Awaited<
+        ReturnType<typeof geminiEngine.parseNaturalProjectBrief>
+      > | null = null;
+      if (typeof naturalDescription === 'string' && naturalDescription.trim()) {
+        parsedNaturalInput = await geminiEngine.parseNaturalProjectBrief({
+          description: naturalDescription,
+        });
+      }
+
+      const budgetCents = Math.max(
+        1000,
+        Math.round(Number(totalBudgetCents ?? parsedNaturalInput?.totalBudgetCents) || 245000)
+      );
+      const cleanTitle = String(
+        projectTitle || parsedNaturalInput?.projectTitle || 'Client Web & Payment Build'
+      );
       const cleanBrief = String(
         projectBrief ||
+          parsedNaturalInput?.projectBrief ||
           'Design, implement, test, and launch a client web application with PayPal checkout.'
       );
-      const cleanClientEmail = String(clientEmail || 'client-treasury@personal.example.com');
+      const cleanClientEmail = String(
+        clientEmail || parsedNaturalInput?.clientEmail || 'client-treasury@personal.example.com'
+      );
 
       const aiScope = await geminiEngine.architectSmartMilestones({
         projectBrief: `${cleanTitle}: ${cleanBrief}`,
         totalBudgetCents: budgetCents,
       });
 
-      const parsedCollabs: CollaboratorShareInput[] = Array.isArray(collaborators)
-        ? collaborators.map((c: Record<string, unknown>) => ({
+      const incomingCollabs =
+        Array.isArray(collaborators) && collaborators.length > 0
+          ? collaborators
+          : parsedNaturalInput?.collaborators || [];
+
+      const parsedCollabs: CollaboratorShareInput[] = Array.isArray(incomingCollabs)
+        ? incomingCollabs.map((c: Record<string, unknown>) => ({
             collaboratorName: String(c.collaboratorName || 'Team Member'),
             paypalEmail: String(c.paypalEmail || 'member@personal.example.com'),
             role: String(c.role || 'Specialist'),
@@ -2842,6 +4192,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       });
 
       res.json({
+        parsedNaturalInput,
         plan,
         aiSummary: aiScope.aiSummary,
         telemetry: aiScope.telemetry,
@@ -3001,6 +4352,320 @@ export function createAegisServer(options: AegisServerOptions = {}) {
   });
 
   // ==========================================================================
+  // 9B. UNIVERSAL 1-CLICK DEVICE AGENT & PROACTIVE NEXT-BEST-ACTION ENGINE
+  // ==========================================================================
+
+  async function runUniversalAgentIngest(
+    ws: TenantWorkspace,
+    params: {
+      rawText?: string;
+      fileName?: string;
+      imageBase64?: string;
+      imageMimeType?: string;
+      forceWorkflow?: string;
+      autoExecute?: boolean;
+    }
+  ): Promise<{
+    detectedWorkflow:
+      | 'INVOICE_SAFETY'
+      | 'SUBSCRIPTION_IMPORT'
+      | 'CASHFLOW_CHECK'
+      | 'FAILED_PAYMENT'
+      | 'DAMAGE_REFUND'
+      | 'CHURN_SAVER'
+      | 'MILESTONE_PLAN'
+      | 'VENDOR_DEAL';
+    targetSection: 'protect' | 'merchant' | 'getpaid';
+    targetSubTab: string;
+    summary: string;
+    executionResult: unknown;
+  }> {
+    const raw = String(params.rawText || '').trim();
+    const lower = `${raw} ${params.fileName || ''}`.toLowerCase();
+
+    let detectedWorkflow:
+      | 'INVOICE_SAFETY'
+      | 'SUBSCRIPTION_IMPORT'
+      | 'CASHFLOW_CHECK'
+      | 'FAILED_PAYMENT'
+      | 'DAMAGE_REFUND'
+      | 'CHURN_SAVER'
+      | 'MILESTONE_PLAN'
+      | 'VENDOR_DEAL' = 'INVOICE_SAFETY';
+
+    if (params.forceWorkflow) {
+      detectedWorkflow = params.forceWorkflow as typeof detectedWorkflow;
+    } else if (
+      lower.includes('.csv') ||
+      (lower.includes('subscription') && (lower.includes('autopay') || lower.includes('/mo'))) ||
+      lower.includes('recurring charge') ||
+      lower.includes('billing agreement')
+    ) {
+      detectedWorkflow = 'SUBSCRIPTION_IMPORT';
+    } else if (
+      lower.includes('can i afford') ||
+      lower.includes('afford') ||
+      lower.includes('checking balance') ||
+      lower.includes('safety buffer')
+    ) {
+      detectedWorkflow = 'CASHFLOW_CHECK';
+    } else if (
+      lower.includes('declined') ||
+      lower.includes('insufficient_funds') ||
+      lower.includes('insufficient funds') ||
+      lower.includes('expired_card') ||
+      lower.includes('issuer_timeout') ||
+      lower.includes('failed payment')
+    ) {
+      detectedWorkflow = 'FAILED_PAYMENT';
+    } else if (
+      lower.includes('chipped') ||
+      lower.includes('scratched') ||
+      lower.includes('shattered') ||
+      lower.includes('cracked') ||
+      lower.includes('damaged') ||
+      lower.includes('broken') ||
+      lower.includes('partial refund')
+    ) {
+      detectedWorkflow = 'DAMAGE_REFUND';
+    } else if (
+      lower.includes('cancel my subscription') ||
+      lower.includes('want to cancel') ||
+      lower.includes('thinking of canceling') ||
+      lower.includes('cancel our plan') ||
+      lower.includes('unsubscribe')
+    ) {
+      detectedWorkflow = 'CHURN_SAVER';
+    } else if (
+      lower.includes('milestone') ||
+      lower.includes('statement of work') ||
+      lower.includes('sow') ||
+      (lower.includes('collaborator') && lower.includes('split')) ||
+      (lower.includes('build a') && lower.includes('budget'))
+    ) {
+      detectedWorkflow = 'MILESTONE_PLAN';
+    } else if (
+      lower.includes('vendor quote') ||
+      lower.includes('counter-offer') ||
+      (lower.includes('quoted') && (lower.includes('target') || lower.includes('budget'))) ||
+      lower.includes('negotiate')
+    ) {
+      detectedWorkflow = 'VENDOR_DEAL';
+    }
+
+    if (detectedWorkflow === 'SUBSCRIPTION_IMPORT') {
+      const res = await executeMcpToolCall(ws, 'aegispay_audit_subscriptions', {
+        action: 'IMPORT_TEXT',
+        rawText: raw || 'Legacy Cloud Backup $49.00/mo, unused for 120 days',
+      });
+      return {
+        detectedWorkflow,
+        targetSection: 'protect',
+        targetSubTab: 'subscriptions',
+        summary: `Imported recurring subscription statement into Subscription & Autopay Cleanup and flagged unused/hiked agreements.`,
+        executionResult: res,
+      };
+    }
+
+    if (detectedWorkflow === 'CASHFLOW_CHECK') {
+      const res = await executeMcpToolCall(ws, 'aegispay_check_cashflow', {
+        query: raw || 'Can I afford a $580 4K Studio Monitor this week?',
+      });
+      return {
+        detectedWorkflow,
+        targetSection: 'protect',
+        targetSubTab: 'affordability',
+        summary: `Evaluated purchase affordability against your checking balance, safety buffer, and upcoming bills.`,
+        executionResult: res,
+      };
+    }
+
+    if (detectedWorkflow === 'FAILED_PAYMENT') {
+      const res = await executeMcpToolCall(ws, 'aegispay_payrevive_recover', {
+        naturalDescription: raw,
+      });
+      return {
+        detectedWorkflow,
+        targetSection: 'merchant',
+        targetSubTab: 'payrevive',
+        summary: `Diagnosed failed payment via Newton GBDT + Exact TreeSHAP + LinUCB Bandit + Compliance Gate.`,
+        executionResult: res,
+      };
+    }
+
+    if (detectedWorkflow === 'DAMAGE_REFUND') {
+      const res = await executeMcpToolCall(ws, 'aegispay_cliprefund_evaluate', {
+        naturalDescription: raw,
+      });
+      return {
+        detectedWorkflow,
+        targetSection: 'merchant',
+        targetSubTab: 'cliprefund',
+        summary: `Evaluated damaged-delivery claim and calculated Keep-the-Item partial PayPal refund.`,
+        executionResult: res,
+      };
+    }
+
+    if (detectedWorkflow === 'CHURN_SAVER') {
+      const res = await executeMcpToolCall(ws, 'aegispay_churnrescue_intercept', {
+        naturalDescription: raw,
+      });
+      return {
+        detectedWorkflow,
+        targetSection: 'merchant',
+        targetSubTab: 'churnrescue',
+        summary: `Analyzed subscriber cancellation request and generated right-sized PayPal retention offer.`,
+        executionResult: res,
+      };
+    }
+
+    if (detectedWorkflow === 'MILESTONE_PLAN') {
+      const res = await executeMcpToolCall(ws, 'aegispay_paystream_create_plan', {
+        naturalDescription: raw,
+      });
+      return {
+        detectedWorkflow,
+        targetSection: 'getpaid',
+        targetSubTab: 'paystream',
+        summary: `Decomposed project brief into penny-exact PayPal milestones and team payout splits.`,
+        executionResult: res,
+      };
+    }
+
+    if (detectedWorkflow === 'VENDOR_DEAL') {
+      const res = await executeMcpToolCall(ws, 'aegispay_dealforge_negotiate', {
+        naturalDescription: raw,
+      });
+      return {
+        detectedWorkflow,
+        targetSection: 'getpaid',
+        targetSubTab: 'dealforge',
+        summary: `Negotiated vendor quote within buyer/seller mandates and generated signed SHA-256 deal contract.`,
+        executionResult: res,
+      };
+    }
+
+    const scamRes = await executeMcpToolCall(ws, 'aegispay_scamshield_review', {
+      rawText: raw || 'Invoice #1049 for UI Design: $45.00 USD via PayPal.',
+    });
+    return {
+      detectedWorkflow: 'INVOICE_SAFETY',
+      targetSection: 'protect',
+      targetSubTab: 'scam',
+      summary: `Scanned invoice/payment request for social-engineering scams, lookalike domains, and prompt injection.`,
+      executionResult: scamRes,
+    };
+  }
+
+  app.get('/api/agent/suggestions', (req, res) => {
+    const ws = getWorkspace(req);
+    const zombieReport = auditPayPalPermissions(ws.billingPermissions);
+    const flaggedPerms = zombieReport.audits.filter((a) => a.isZombie);
+    const tenantOrders = paypalGateway.getOrders(ws.tenantId);
+    const heldOrders = tenantOrders.filter((o) => o.status === 'AUTHORIZED');
+    const draftMilestonePlan = ws.milestonePlans.find((p) =>
+      p.milestones.some((m) => m.status === 'PENDING_INVOICE')
+    );
+    const draftMilestone = draftMilestonePlan?.milestones.find(
+      (m) => m.status === 'PENDING_INVOICE'
+    );
+
+    const suggestions = [];
+
+    if (flaggedPerms.length > 0) {
+      suggestions.push({
+        id: 'sug_clean_subs',
+        priority: 'HIGH',
+        badge: `SAVE $${(zombieReport.recoverableMonthlyCents / 100).toFixed(2)}/MO`,
+        title: `Auto-Clean ${flaggedPerms.length} Flagged Subscription(s) & Autopays`,
+        description: `Cancel unused recurring agreements and tighten oversized merchant pull caps in 1 click ($${(zombieReport.totalAnnualExposureCents / 100).toFixed(2)}/yr exposure).`,
+        actionType: 'CLEAN_SUBSCRIPTIONS',
+        targetSection: 'protect',
+      });
+    }
+
+    if (heldOrders.length > 0) {
+      suggestions.push({
+        id: 'sug_held_order',
+        priority: 'HIGH',
+        badge: `${heldOrders.length} HELD ON PAYPAL`,
+        title: `Approve or Void Held Order ${heldOrders[0].orderId} ($${(heldOrders[0].amountCents / 100).toFixed(2)})`,
+        description: `Order for ${heldOrders[0].merchantName} is paused on a PayPal AUTHORIZE hold awaiting your 1-click decision.`,
+        actionType: 'RESOLVE_HELD_ORDER',
+        orderId: heldOrders[0].orderId,
+        targetSection: 'protect',
+      });
+    }
+
+    if (draftMilestonePlan && draftMilestone) {
+      suggestions.push({
+        id: 'sug_milestone_invoice',
+        priority: 'MEDIUM',
+        badge: `$${(draftMilestone.amountCents / 100).toFixed(2)} READY`,
+        title: `Send Live PayPal Invoice for "${draftMilestone.title}"`,
+        description: `Project "${draftMilestonePlan.projectTitle}" has an unbilled milestone ready to send to ${draftMilestonePlan.clientEmail}.`,
+        actionType: 'SEND_DRAFT_MILESTONE_INVOICE',
+        planId: draftMilestonePlan.planId,
+        milestoneId: draftMilestone.milestoneId,
+        targetSection: 'getpaid',
+      });
+    }
+
+    suggestions.push({
+      id: 'sug_payrevive_queue',
+      priority: 'MEDIUM',
+      badge: '+$149.00 EV',
+      title: 'Run Autonomous Recovery on Declined Checkout Queue',
+      description:
+        'Diagnose the top declined renewal with Newton GBDT + Exact TreeSHAP and send a payday-aligned PayPal recovery link.',
+      actionType: 'RECOVER_DECLINED_CHECKOUT',
+      targetSection: 'merchant',
+    });
+
+    res.json({
+      suggestions,
+      mcpOnline: true,
+      mcpToolCount: MCP_TOOLS_CATALOG.length,
+    });
+  });
+
+  app.post('/api/agent/ingest', async (req, res) => {
+    try {
+      const ws = getWorkspace(req);
+      const { rawText, fileName, imageBase64, imageMimeType, forceWorkflow, autoExecute } =
+        req.body || {};
+
+      const outcome = await runUniversalAgentIngest(ws, {
+        rawText: typeof rawText === 'string' ? rawText : '',
+        fileName: typeof fileName === 'string' ? fileName : undefined,
+        imageBase64: typeof imageBase64 === 'string' ? imageBase64 : undefined,
+        imageMimeType: typeof imageMimeType === 'string' ? imageMimeType : undefined,
+        forceWorkflow: typeof forceWorkflow === 'string' ? forceWorkflow : undefined,
+        autoExecute: autoExecute !== false,
+      });
+
+      const auditRow = appendAudit(req, {
+        pillar: 'LUPAPERMIT',
+        actor: 'Universal Device Agent',
+        eventTitle: `1-Click Device Ingest [${outcome.detectedWorkflow}]: ${outcome.summary}`,
+        verdict: 'ALLOW',
+        amountCents: 0,
+        savedOrProtectedCents: 0,
+        paypalRef: outcome.detectedWorkflow,
+        sha256Hash: sha256Hex({ rawText: String(rawText || '').slice(0, 256), outcome }),
+        deterministicRule: `Autonomous Device Artifact Classifier -> ${outcome.detectedWorkflow}`,
+      });
+
+      res.json({
+        ...outcome,
+        auditRow,
+      });
+    } catch (err) {
+      res.status(400).json({ error: redactSecrets((err as Error).message) });
+    }
+  });
+
+  // ==========================================================================
   // 10. DIAGNOSTICS LAB: FUZZER, AUDIT EXPORT & STATIC ASSETS
   // ==========================================================================
 
@@ -3045,11 +4710,10 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       path.join(process.cwd(), 'public', 'postman', 'AegisPay_Collection.json'),
     ];
     const found = candidates.find((p) => fs.existsSync(p));
-    if (found) {
-      res.sendFile(found);
-    } else {
-      res.status(404).json({ error: 'Postman collection not generated yet' });
-    }
+    const jsonString = found ? fs.readFileSync(found, 'utf8') : EMBEDDED_POSTMAN_COLLECTION_JSON;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="AegisPay_Collection.json"');
+    res.send(jsonString);
   });
 
   app.get('/extension.zip', readLimiter.middleware(), (_req, res) => {
@@ -3059,16 +4723,16 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       path.join(process.cwd(), 'dist', 'extension.zip'),
     ];
     const found = candidates.find((p) => fs.existsSync(p));
-    if (found) {
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader(
-        'Content-Disposition',
-        'attachment; filename="aegispay-chrome-extension-mv3.zip"'
-      );
-      res.sendFile(found);
-    } else {
-      res.status(404).json({ error: 'Extension zip not packaged yet' });
-    }
+    const zipBuffer = found
+      ? fs.readFileSync(found)
+      : Buffer.from(EMBEDDED_EXTENSION_ZIP_BASE64, 'base64');
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="aegispay-chrome-extension-mv3.zip"'
+    );
+    res.setHeader('Content-Length', String(zipBuffer.length));
+    res.send(zipBuffer);
   });
 
   const distDir = path.join(ROOT_DIR, 'dist');

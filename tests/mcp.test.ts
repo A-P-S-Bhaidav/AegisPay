@@ -60,7 +60,7 @@ describe('AegisPay MCP Server (Model Context Protocol JSON-RPC 2.0 Verification)
     });
   }
 
-  it('responds to JSON-RPC 2.0 initialize handshake with v3.1.0 server capabilities', async () => {
+  it('responds to JSON-RPC 2.0 initialize handshake with v3.2.0 server capabilities', async () => {
     const res = await callMcpRpc({
       jsonrpc: '2.0',
       id: 1,
@@ -68,11 +68,11 @@ describe('AegisPay MCP Server (Model Context Protocol JSON-RPC 2.0 Verification)
       params: {},
     });
     expect(res.result.serverInfo.name).toBe('aegispay-paypal-mcp-server');
-    expect(res.result.serverInfo.version).toBe('3.1.0');
+    expect(res.result.serverInfo.version).toBe('3.2.0');
     expect(res.result.protocolVersion).toBe('2024-11-05');
   });
 
-  it('lists all 7 AegisPay agentic PayPal tools via tools/list including PayRevive', async () => {
+  it('lists all 12 AegisPay agentic PayPal tools via tools/list including PayRevive, DealForge, and Universal Ingest', async () => {
     const res = await callMcpRpc({
       jsonrpc: '2.0',
       id: 2,
@@ -83,11 +83,17 @@ describe('AegisPay MCP Server (Model Context Protocol JSON-RPC 2.0 Verification)
     expect(names).toEqual([
       'aegispay_list_permits',
       'aegispay_check_cashflow',
+      'aegispay_audit_subscriptions',
+      'aegispay_compile_spending_rule',
       'aegispay_agent_pay',
       'aegispay_scamshield_review',
+      'aegispay_payrevive_recover',
+      'aegispay_cliprefund_evaluate',
+      'aegispay_churnrescue_intercept',
       'aegispay_paystream_create_plan',
       'aegispay_paystream_issue_invoice',
-      'aegispay_payrevive_recover',
+      'aegispay_dealforge_negotiate',
+      'aegispay_universal_ingest',
     ]);
   });
 

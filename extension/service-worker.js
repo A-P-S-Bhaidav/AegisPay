@@ -1,5 +1,5 @@
-// AegisPay Checkout Firewall Manifest V3 Service Worker
-// Authenticates via HMAC session and connects to localhost:8787 or https://aegispay-orpin.vercel.app
+// AegisPay Agentic Firewall & PayPal Guard Manifest V3 Service Worker (v3.2.0)
+// Connects automatically to http://localhost:8787 or https://aegispay-orpin.vercel.app
 
 const DEFAULT_ENDPOINTS = ['http://localhost:8787', 'https://aegispay-orpin.vercel.app'];
 
@@ -9,7 +9,12 @@ chrome.runtime.onInstalled.addListener(async () => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: 'aegispay-scan-selection',
-      title: 'Scan Payment Text with AegisPay Firewall',
+      title: 'AegisPay: Scan Selected Invoice / Payment Text',
+      contexts: ['selection'],
+    });
+    chrome.contextMenus.create({
+      id: 'aegispay-ingest-selection',
+      title: 'AegisPay: 1-Click Autonomous Agent Action on Selection',
       contexts: ['selection'],
     });
   });
@@ -24,15 +29,14 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== 'aegispay-scan-selection' || !info.selectionText) {
-    return;
-  }
+  if (!info.selectionText) return;
 
   const selectedText = info.selectionText.trim();
   await chrome.storage.local.set({
     lastSelectedText: selectedText,
     lastSelectedUrl: tab?.url || '',
     lastSelectedAt: new Date().toISOString(),
+    lastActionMode: info.menuItemId === 'aegispay-ingest-selection' ? 'AGENT_INGEST' : 'SCAN',
   });
 
   if (tab?.windowId) {
@@ -49,7 +53,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         target: { tabId: tab.id },
         func: (snippet) => {
           const toast = document.createElement('div');
-          toast.textContent = `[AEGISPAY FIREWALL] Analyzing "${snippet.slice(0, 42)}..." in Side Panel`;
+          toast.textContent = `[AEGISPAY AGENT] Analyzing "${snippet.slice(0, 44)}..." in Side Panel`;
           Object.assign(toast.style, {
             position: 'fixed',
             bottom: '20px',
@@ -100,32 +104,30 @@ async function getOrMintSessionToken(base) {
   return '';
 }
 
-async function fetchWithEndpointFailover(path, payload) {
+async function fetchWithEndpointFailover(path, payload, method = 'POST') {
   let lastError = null;
   for (const base of DEFAULT_ENDPOINTS) {
     try {
       let token = await getOrMintSessionToken(base);
-      let response = await fetch(`${base}${path}`, {
-        method: 'POST',
+      const init = {
+        method,
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify(payload),
-      });
+        ...(method === 'POST' ? { body: JSON.stringify(payload || {}) } : {}),
+      };
+      let response = await fetch(`${base}${path}`, init);
       if (response.status === 401) {
         const { operatorTokenMap = {} } = await chrome.storage.local.get('operatorTokenMap');
         delete operatorTokenMap[base];
         await chrome.storage.local.set({ operatorTokenMap });
         token = await getOrMintSessionToken(base);
-        response = await fetch(`${base}${path}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify(payload),
-        });
+        init.headers = {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        };
+        response = await fetch(`${base}${path}`, init);
       }
       if (response.ok) {
         const data = await response.json();
@@ -167,6 +169,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: true, data, endpointUsed });
         return;
       }
+
+      if (message?.type === 'AEGISPAY_CREATE_PAYPAL_ORDER') {
+        const { data, endpointUsed } = await fetchWithEndpointFailover(
+          '/api/scamshield/create-paypal-order',
+          message.payload
+        );
+        sendResponse({ ok: true, data, endpointUsed });
+        return;
+      }
+
+      if (message?.type === 'AEGISPAY_AGENT_INGEST') {
+        const { data, endpointUsed } = await fetchWithEndpointFailover(
+          '/api/agent/ingest',
+          message.payload
+        );
+        sendResponse({ ok: true, data, endpointUsed });
+        return;
+      }
+
       sendResponse({ ok: false, error: 'Unknown message type' });
     } catch (err) {
       sendResponse({ ok: false, error: String(err) });

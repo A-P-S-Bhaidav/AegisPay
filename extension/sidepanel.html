@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="color-scheme" content="dark" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AegisPay Checkout Firewall</title>
+    <title>AegisPay Agentic Side Panel</title>
     <style>
       :root {
         color-scheme: dark;
@@ -14,19 +14,19 @@
       }
       body {
         margin: 0;
-        padding: 16px;
+        padding: 14px;
       }
       .header {
         display: flex;
         align-items: center;
         justify-content: space-between;
         border-bottom: 1.5px solid #0047ff;
-        padding-bottom: 12px;
-        margin-bottom: 14px;
+        padding-bottom: 10px;
+        margin-bottom: 12px;
       }
       .brand {
         font-weight: 800;
-        font-size: 13px;
+        font-size: 12px;
         letter-spacing: 0.06em;
         color: #f8fafc;
       }
@@ -34,9 +34,15 @@
         font-family: monospace;
         font-size: 10px;
         font-weight: 800;
-        padding: 3px 8px;
+        padding: 3px 7px;
         background: #ccff00;
         color: #050507;
+      }
+      .quick-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-bottom: 8px;
       }
       label {
         display: block;
@@ -46,7 +52,7 @@
         text-transform: uppercase;
         letter-spacing: 0.08em;
         color: #94a3b8;
-        margin-top: 12px;
+        margin-top: 10px;
         margin-bottom: 4px;
       }
       textarea, input {
@@ -65,8 +71,8 @@
       }
       button {
         width: 100%;
-        margin-top: 12px;
-        padding: 10px 14px;
+        margin-top: 8px;
+        padding: 9px 12px;
         border: 1.5px solid #0047ff;
         border-radius: 2px;
         background: #ccff00;
@@ -84,8 +90,14 @@
         border: 1px solid #1e2433;
         box-shadow: none;
       }
+      button.cobalt {
+        background: #0047ff;
+        color: #f8fafc;
+        border: 1.5px solid #ccff00;
+        box-shadow: 3px 3px 0 #ccff00;
+      }
       .result-card {
-        margin-top: 14px;
+        margin-top: 12px;
         padding: 12px;
         border-radius: 2px;
         background: #0a0c12;
@@ -94,34 +106,55 @@
       }
       .mono {
         font-family: monospace;
-        font-size: 11px;
+        font-size: 10px;
         word-break: break-all;
         color: #94a3b8;
+      }
+      .link-btn {
+        display: block;
+        text-align: center;
+        margin-top: 8px;
+        padding: 8px 10px;
+        background: #0047ff;
+        color: #ffffff;
+        text-decoration: none;
+        font-weight: 800;
+        font-size: 11px;
+        text-transform: uppercase;
+        border: 1px solid #ccff00;
       }
     </style>
   </head>
   <body>
     <div class="header">
-      <div class="brand">AEGISPAY FIREWALL</div>
-      <span class="badge">MV3 GUARD</span>
+      <div class="brand">AEGISPAY AGENT</div>
+      <span class="badge">MV3 v3.2</span>
     </div>
 
-    <label for="payeeInput">Payee Identifier</label>
+    <button id="scanPageBtn" type="button" class="cobalt">1-Click Auto-Scan Active Webpage</button>
+    <div class="quick-row">
+      <button id="pasteClipBtn" type="button" class="secondary">Paste Clipboard</button>
+      <button id="injectScamBtn" type="button" class="secondary">Load Scam Sample</button>
+    </div>
+
+    <label for="payeeInput">Detected Payee / Merchant</label>
     <input id="payeeInput" type="text" value="billing@FreelanceStudio.io" />
 
-    <label for="amountInput">Claimed Amount (USD)</label>
+    <label for="amountInput">Detected Amount (USD)</label>
     <input id="amountInput" type="number" step="0.01" value="45.00" />
 
-    <label for="textInput">Invoice / Payment Text</label>
+    <label for="textInput">Webpage / Invoice / Statement Text</label>
     <textarea id="textInput" rows="4">Invoice #1049 for UI Icons Milestone: $45.00 USD via PayPal Checkout.</textarea>
 
-    <button id="scanBtn" type="button">Scan &amp; Mint PayPal Token</button>
-    <button id="injectScamBtn" type="button" class="secondary">Load Adversarial Scam Test</button>
+    <button id="scanBtn" type="button">Scan &amp; Unlock PayPal Checkout</button>
+    <button id="agentIngestBtn" type="button" class="secondary">Run 1-Click Universal Agent Action</button>
 
     <div id="resultBox" class="result-card" hidden>
       <div id="verdictTitle" style="font-weight: 800; font-size: 13px; margin-bottom: 6px;"></div>
-      <div id="verdictSummary" style="margin-bottom: 8px;"></div>
+      <div id="verdictSummary" style="margin-bottom: 8px; line-height: 1.4;"></div>
       <div id="tokenBox" class="mono"></div>
+      <button id="createPayPalOrderBtn" type="button" hidden>Open Verified PayPal Checkout</button>
+      <a id="paypalCheckoutLink" class="link-btn" href="#" target="_blank" rel="noreferrer" hidden>Launch PayPal Sandbox Approval</a>
     </div>
 
     <script type="module" src="sidepanel.js"></script>

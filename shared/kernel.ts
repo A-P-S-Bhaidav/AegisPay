@@ -61,6 +61,8 @@ export interface PayPalBillingPermission {
   createdDaysAgo: number;
   previousChargeCents?: number;
   status: 'ACTIVE' | 'SUSPENDED' | 'REVOKED';
+  paypalApprovalUrl?: string;
+  source?: 'PAYPAL_SANDBOX_SYNC' | 'DEVICE_STATEMENT_IMPORT' | 'USER_ADDED' | 'SEED';
 }
 
 export interface ZombiePermissionAudit {

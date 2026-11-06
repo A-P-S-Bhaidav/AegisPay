@@ -657,11 +657,19 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
               Extension.
             </p>
             <div className="flex flex-wrap gap-3">
-              <a href="/postman/AegisPay_Collection.json" download className="btn-acid px-4 py-2.5 text-xs">
+              <a
+                href="/api/download/postman"
+                download="AegisPay_Postman_Collection.json"
+                className="btn-acid px-4 py-2.5 text-xs"
+              >
                 <Download className="w-4 h-4" />
                 Postman API Collection
               </a>
-              <a href="/extension.zip" download className="btn-cobalt px-4 py-2.5 text-xs">
+              <a
+                href="/api/download/extension"
+                download="aegispay-chrome-extension-mv3.zip"
+                className="btn-cobalt px-4 py-2.5 text-xs"
+              >
                 <Download className="w-4 h-4" />
                 Chrome Extension (MV3 .zip)
               </a>

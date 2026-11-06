@@ -1,24 +1,26 @@
 {
   "manifest_version": 3,
-  "name": "AegisPay Checkout Firewall & Permit Guard for PayPal",
-  "version": "2.0.0",
-  "description": "Scan invoices, payment links, and checkout requests on any webpage before opening PayPal. Blocks scams and prompt injections.",
+  "name": "AegisPay Agentic Firewall & PayPal Guard",
+  "version": "3.2.0",
+  "description": "1-click webpage scanner, invoice & link safety firewall, subscription detector, and verified PayPal checkout companion.",
   "permissions": [
     "storage",
     "contextMenus",
     "sidePanel",
     "scripting",
-    "tabs"
+    "tabs",
+    "activeTab"
   ],
   "host_permissions": [
     "http://localhost:8787/*",
     "http://localhost:5173/*",
     "https://aegispay-orpin.vercel.app/*",
     "https://*.vercel.app/*",
-    "https://*.paypal.com/*"
+    "https://*.paypal.com/*",
+    "<all_urls>"
   ],
   "action": {
-    "default_title": "Open AegisPay Firewall Side Panel"
+    "default_title": "Open AegisPay Agentic Side Panel"
   },
   "side_panel": {
     "default_path": "sidepanel.html"
