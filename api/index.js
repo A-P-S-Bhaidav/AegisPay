@@ -5570,6 +5570,8 @@ var AegisMultiTenantStore = class {
         organization: "AegisPay Sandbox Account",
         role: "PRINCIPAL_ARCHITECT",
         passwordScrypt: hashPasswordScrypt("AegisPay2026!", demoSalt),
+        hasPassword: true,
+        authProviders: ["EMAIL_PASSWORD"],
         paypalMerchantId: "SBX-MERCH-AEGIS-01",
         createdAtIso: now,
         lastLoginAtIso: now
@@ -5584,6 +5586,8 @@ var AegisMultiTenantStore = class {
         organization: "PayPal Sandbox Demo",
         role: "DEMO_OPERATOR",
         passwordScrypt: hashPasswordScrypt(crypto4.randomBytes(24).toString("hex")),
+        hasPassword: false,
+        authProviders: ["DEMO_SANDBOX"],
         paypalMerchantId: "SBX-DEMO-GUEST-01",
         createdAtIso: now,
         lastLoginAtIso: now
@@ -5603,7 +5607,17 @@ var AegisMultiTenantStore = class {
       if (Array.isArray(parsed.users)) {
         for (const u of parsed.users) {
           if (u?.email && u?.passwordScrypt) {
-            this.usersByEmail.set(u.email.toLowerCase(), u);
+            const normalizedEmail = u.email.toLowerCase();
+            const isDemo = normalizedEmail === "demo@aegispay.io" || u.role === "DEMO_OPERATOR";
+            const isLegacyOAuthOnly = String(u.paypalMerchantId || "").startsWith("SBX-GOOGLE-");
+            const inferredHasPassword = typeof u.hasPassword === "boolean" ? u.hasPassword : !isDemo && !isLegacyOAuthOnly;
+            const inferredProviders = Array.isArray(u.authProviders) && u.authProviders.length > 0 ? u.authProviders : isDemo ? ["DEMO_SANDBOX"] : isLegacyOAuthOnly ? ["GOOGLE_OAUTH"] : ["EMAIL_PASSWORD"];
+            this.usersByEmail.set(normalizedEmail, {
+              ...u,
+              email: normalizedEmail,
+              hasPassword: inferredHasPassword,
+              authProviders: [...inferredProviders]
+            });
           }
         }
       }
@@ -5685,6 +5699,8 @@ var AegisMultiTenantStore = class {
       organization: params.organization.trim() || "PayPal Workspace",
       role: params.role || "TREASURY_OPERATOR",
       passwordScrypt: hashPasswordScrypt(params.rawPassword),
+      hasPassword: true,
+      authProviders: ["EMAIL_PASSWORD"],
       paypalMerchantId: `SBX-MERCH-${sha256Hex(normalizedEmail).slice(0, 6).toUpperCase()}`,
       createdAtIso: now,
       lastLoginAtIso: now
@@ -5693,13 +5709,41 @@ var AegisMultiTenantStore = class {
     await this.flushAsync();
     return record;
   }
+  async linkPasswordToUser(params) {
+    const normalizedEmail = params.email.trim().toLowerCase();
+    const existing = this.usersByEmail.get(normalizedEmail);
+    if (!existing) return void 0;
+    existing.passwordScrypt = hashPasswordScrypt(params.rawPassword);
+    existing.hasPassword = true;
+    const providers = new Set(
+      existing.authProviders || ["GOOGLE_OAUTH"]
+    );
+    providers.add("EMAIL_PASSWORD");
+    existing.authProviders = Array.from(providers);
+    if (params.fullName && params.fullName.trim()) {
+      existing.fullName = params.fullName.trim();
+    }
+    if (params.organization && params.organization.trim()) {
+      existing.organization = params.organization.trim();
+    }
+    existing.lastLoginAtIso = (/* @__PURE__ */ new Date()).toISOString();
+    await this.flushAsync();
+    return existing;
+  }
   upsertOAuthUser(params) {
     const normalizedEmail = params.email.trim().toLowerCase();
     const existing = this.usersByEmail.get(normalizedEmail);
     const now = (/* @__PURE__ */ new Date()).toISOString();
     if (existing) {
       existing.lastLoginAtIso = now;
-      existing.fullName = params.fullName || existing.fullName;
+      if (!existing.fullName && params.fullName) {
+        existing.fullName = params.fullName;
+      }
+      const providers = new Set(
+        existing.authProviders || (existing.hasPassword ? ["EMAIL_PASSWORD"] : [])
+      );
+      providers.add("GOOGLE_OAUTH");
+      existing.authProviders = Array.from(providers);
       this.scheduleFlush();
       return existing;
     }
@@ -5710,6 +5754,8 @@ var AegisMultiTenantStore = class {
       organization: params.organization,
       role: params.role,
       passwordScrypt: hashPasswordScrypt(crypto4.randomBytes(24).toString("hex")),
+      hasPassword: false,
+      authProviders: ["GOOGLE_OAUTH"],
       paypalMerchantId: params.paypalMerchantId,
       createdAtIso: now,
       lastLoginAtIso: now
@@ -6049,8 +6095,54 @@ function createAegisServer(options = {}) {
       res.status(400).json({ error: "Password must be at least 8 characters." });
       return;
     }
-    if (store.getUserByEmail(normalizedEmail)) {
-      res.status(409).json({ error: "An account with this email already exists. Please sign in." });
+    const existing = store.getUserByEmail(normalizedEmail);
+    if (existing) {
+      if (existing.role === "DEMO_OPERATOR") {
+        res.status(409).json({
+          code: "DEMO_ACCOUNT_RESERVED",
+          error: "This email belongs to the shared Demo Sandbox. Please use your own email address."
+        });
+        return;
+      }
+      if (existing.hasPassword === false) {
+        const linked = await store.linkPasswordToUser({
+          email: normalizedEmail,
+          rawPassword: rawPass,
+          fullName: typeof fullName === "string" && fullName.trim() ? fullName.trim() : void 0,
+          organization: typeof organization === "string" && organization.trim() ? organization.trim() : void 0
+        });
+        if (!linked) {
+          res.status(500).json({ error: "Could not link password to existing account." });
+          return;
+        }
+        const { token: token2, operator: operator2 } = issueOperatorSession(linked, "EMAIL_PASSWORD");
+        setSessionCookie(req, res, token2);
+        const ws2 = store.getTenantWorkspace(operator2.id, operator2.email);
+        store.appendTenantAuditLog(ws2, {
+          pillar: "AUTH",
+          actor: operator2.fullName,
+          eventTitle: `Linked Email Password to Google Account (${operator2.email})`,
+          verdict: "ALLOW",
+          amountCents: 0,
+          savedOrProtectedCents: 0,
+          paypalRef: operator2.paypalMerchantId,
+          sha256Hash: operator2.sessionTokenHash,
+          deterministicRule: "Unified Google OAuth + scrypt Password Identity"
+        });
+        res.status(200).json({
+          authenticated: true,
+          isNewAccount: false,
+          linkedFromOAuth: true,
+          token: token2,
+          operator: operator2,
+          storage: store.getStorageArchitectureSummary(operator2.id)
+        });
+        return;
+      }
+      res.status(409).json({
+        code: "EMAIL_PASSWORD_ALREADY_REGISTERED",
+        error: "An account with this email already exists. Please sign in with your password or Google."
+      });
       return;
     }
     const created = await store.createUser({
@@ -6076,17 +6168,64 @@ function createAegisServer(options = {}) {
     });
     res.status(201).json({
       authenticated: true,
+      isNewAccount: true,
       token,
       operator,
       storage: store.getStorageArchitectureSummary(operator.id)
     });
   });
-  app2.post("/api/auth/login", authLimiter.middleware(), (req, res) => {
+  app2.post("/api/auth/login", authLimiter.middleware(), async (req, res) => {
     const { email, password } = req.body || {};
     const normalizedEmail = String(email || "").trim().toLowerCase();
     const rawPass = String(password || "");
     const account = store.getUserByEmail(normalizedEmail);
-    if (!account || !verifyPasswordScrypt(rawPass, account.passwordScrypt)) {
+    if (!account) {
+      res.status(401).json({
+        error: "Invalid email or password."
+      });
+      return;
+    }
+    if (account.hasPassword === false && account.role !== "DEMO_OPERATOR") {
+      if (rawPass.length < 8) {
+        res.status(400).json({
+          code: "OAUTH_PASSWORD_MIN_LENGTH",
+          error: "Your Google-linked account does not have an email password yet. Enter at least 8 characters to set your password and sign in, or click Continue with Google."
+        });
+        return;
+      }
+      const linked = await store.linkPasswordToUser({
+        email: normalizedEmail,
+        rawPassword: rawPass
+      });
+      if (!linked) {
+        res.status(500).json({ error: "Could not link password to existing account." });
+        return;
+      }
+      const { token: token2, operator: operator2 } = issueOperatorSession(linked, "EMAIL_PASSWORD");
+      setSessionCookie(req, res, token2);
+      const ws2 = store.getTenantWorkspace(operator2.id, operator2.email);
+      store.appendTenantAuditLog(ws2, {
+        pillar: "AUTH",
+        actor: operator2.fullName,
+        eventTitle: `Linked Email Password & Signed In (${operator2.email})`,
+        verdict: "ALLOW",
+        amountCents: 0,
+        savedOrProtectedCents: 0,
+        paypalRef: operator2.paypalMerchantId,
+        sha256Hash: operator2.sessionTokenHash,
+        deterministicRule: "Unified Google OAuth + scrypt Password Sign-In"
+      });
+      res.json({
+        authenticated: true,
+        isNewAccount: false,
+        linkedFromOAuth: true,
+        token: token2,
+        operator: operator2,
+        storage: store.getStorageArchitectureSummary(operator2.id)
+      });
+      return;
+    }
+    if (!verifyPasswordScrypt(rawPass, account.passwordScrypt)) {
       res.status(401).json({
         error: "Invalid email or password."
       });
@@ -6108,6 +6247,7 @@ function createAegisServer(options = {}) {
     });
     res.json({
       authenticated: true,
+      isNewAccount: false,
       token,
       operator,
       storage: store.getStorageArchitectureSummary(operator.id)
@@ -6139,6 +6279,7 @@ function createAegisServer(options = {}) {
     });
     res.json({
       authenticated: true,
+      isNewAccount: !ws.tutorialCompleted,
       token,
       operator,
       storage: store.getStorageArchitectureSummary(operator.id)
@@ -6224,12 +6365,13 @@ function createAegisServer(options = {}) {
       const email = profile.email.trim().toLowerCase();
       const fullName = (profile.name || email.split("@")[0]).trim();
       const org = (profile.hd || "Google Verified Workspace").trim();
+      const isFirstOAuthSignup = !store.getUserByEmail(email);
       const upserted = store.upsertOAuthUser({
         email,
         fullName,
         organization: org,
         role: "TREASURY_OPERATOR",
-        paypalMerchantId: `SBX-GOOGLE-${sha256Hex(email).slice(0, 6).toUpperCase()}`
+        paypalMerchantId: `SBX-MERCH-${sha256Hex(email).slice(0, 6).toUpperCase()}`
       });
       const { token, operator } = issueOperatorSession(upserted, "GOOGLE_OAUTH");
       setSessionCookie(req, res, token);
@@ -6245,7 +6387,7 @@ function createAegisServer(options = {}) {
         sha256Hash: operator.sessionTokenHash,
         deterministicRule: "Google OAuth 2.0 State Cookie + Code Exchange + Verified Email"
       });
-      res.redirect("/?auth_ready=1");
+      res.redirect(isFirstOAuthSignup ? "/?auth_ready=1&first_signup=1" : "/?auth_ready=1");
     } catch {
       res.redirect("/?auth_error=google_callback_failed");
     }
@@ -6279,12 +6421,13 @@ function createAegisServer(options = {}) {
       const resolvedEmail = payload.email.trim().toLowerCase();
       const resolvedName = (payload.name || resolvedEmail.split("@")[0]).trim();
       const resolvedOrg = (payload.hd || "Google Identity Verified").trim();
+      const isFirstOAuthSignup = !store.getUserByEmail(resolvedEmail);
       const upserted = store.upsertOAuthUser({
         email: resolvedEmail,
         fullName: resolvedName,
         organization: resolvedOrg,
         role: "TREASURY_OPERATOR",
-        paypalMerchantId: `SBX-GOOGLE-${sha256Hex(resolvedEmail).slice(0, 6).toUpperCase()}`
+        paypalMerchantId: `SBX-MERCH-${sha256Hex(resolvedEmail).slice(0, 6).toUpperCase()}`
       });
       const { token, operator } = issueOperatorSession(upserted, "GOOGLE_OAUTH");
       setSessionCookie(req, res, token);
@@ -6302,6 +6445,7 @@ function createAegisServer(options = {}) {
       });
       res.json({
         authenticated: true,
+        isNewAccount: isFirstOAuthSignup,
         token,
         operator,
         storage: store.getStorageArchitectureSummary(operator.id)

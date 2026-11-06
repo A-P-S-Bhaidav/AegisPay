@@ -449,10 +449,66 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       res.status(400).json({ error: 'Password must be at least 8 characters.' });
       return;
     }
-    if (store.getUserByEmail(normalizedEmail)) {
-      res
-        .status(409)
-        .json({ error: 'An account with this email already exists. Please sign in.' });
+
+    const existing = store.getUserByEmail(normalizedEmail);
+    if (existing) {
+      if (existing.role === 'DEMO_OPERATOR') {
+        res.status(409).json({
+          code: 'DEMO_ACCOUNT_RESERVED',
+          error: 'This email belongs to the shared Demo Sandbox. Please use your own email address.',
+        });
+        return;
+      }
+
+      // Seamless OAuth -> Email/Password account unification:
+      // If the user previously signed in via Google OAuth and has not set an email password yet,
+      // link this password directly to their existing account & workspace without losing any data!
+      if (existing.hasPassword === false) {
+        const linked = await store.linkPasswordToUser({
+          email: normalizedEmail,
+          rawPassword: rawPass,
+          fullName: typeof fullName === 'string' && fullName.trim() ? fullName.trim() : undefined,
+          organization:
+            typeof organization === 'string' && organization.trim()
+              ? organization.trim()
+              : undefined,
+        });
+        if (!linked) {
+          res.status(500).json({ error: 'Could not link password to existing account.' });
+          return;
+        }
+
+        const { token, operator } = issueOperatorSession(linked, 'EMAIL_PASSWORD');
+        setSessionCookie(req, res, token);
+
+        const ws = store.getTenantWorkspace(operator.id, operator.email);
+        store.appendTenantAuditLog(ws, {
+          pillar: 'AUTH',
+          actor: operator.fullName,
+          eventTitle: `Linked Email Password to Google Account (${operator.email})`,
+          verdict: 'ALLOW',
+          amountCents: 0,
+          savedOrProtectedCents: 0,
+          paypalRef: operator.paypalMerchantId,
+          sha256Hash: operator.sessionTokenHash,
+          deterministicRule: 'Unified Google OAuth + scrypt Password Identity',
+        });
+
+        res.status(200).json({
+          authenticated: true,
+          isNewAccount: false,
+          linkedFromOAuth: true,
+          token,
+          operator,
+          storage: store.getStorageArchitectureSummary(operator.id),
+        });
+        return;
+      }
+
+      res.status(409).json({
+        code: 'EMAIL_PASSWORD_ALREADY_REGISTERED',
+        error: 'An account with this email already exists. Please sign in with your password or Google.',
+      });
       return;
     }
 
@@ -482,13 +538,14 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
     res.status(201).json({
       authenticated: true,
+      isNewAccount: true,
       token,
       operator,
       storage: store.getStorageArchitectureSummary(operator.id),
     });
   });
 
-  app.post('/api/auth/login', authLimiter.middleware(), (req, res) => {
+  app.post('/api/auth/login', authLimiter.middleware(), async (req, res) => {
     const { email, password } = req.body || {};
     const normalizedEmail = String(email || '')
       .trim()
@@ -496,7 +553,62 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     const rawPass = String(password || '');
 
     const account = store.getUserByEmail(normalizedEmail);
-    if (!account || !verifyPasswordScrypt(rawPass, account.passwordScrypt)) {
+    if (!account) {
+      res.status(401).json({
+        error: 'Invalid email or password.',
+      });
+      return;
+    }
+
+    // Seamless OAuth -> Email Sign-In: if this user registered via Google OAuth and has no
+    // email password yet, link their entered 8+ character password and sign them right in.
+    if (account.hasPassword === false && account.role !== 'DEMO_OPERATOR') {
+      if (rawPass.length < 8) {
+        res.status(400).json({
+          code: 'OAUTH_PASSWORD_MIN_LENGTH',
+          error:
+            'Your Google-linked account does not have an email password yet. Enter at least 8 characters to set your password and sign in, or click Continue with Google.',
+        });
+        return;
+      }
+
+      const linked = await store.linkPasswordToUser({
+        email: normalizedEmail,
+        rawPassword: rawPass,
+      });
+      if (!linked) {
+        res.status(500).json({ error: 'Could not link password to existing account.' });
+        return;
+      }
+
+      const { token, operator } = issueOperatorSession(linked, 'EMAIL_PASSWORD');
+      setSessionCookie(req, res, token);
+
+      const ws = store.getTenantWorkspace(operator.id, operator.email);
+      store.appendTenantAuditLog(ws, {
+        pillar: 'AUTH',
+        actor: operator.fullName,
+        eventTitle: `Linked Email Password & Signed In (${operator.email})`,
+        verdict: 'ALLOW',
+        amountCents: 0,
+        savedOrProtectedCents: 0,
+        paypalRef: operator.paypalMerchantId,
+        sha256Hash: operator.sessionTokenHash,
+        deterministicRule: 'Unified Google OAuth + scrypt Password Sign-In',
+      });
+
+      res.json({
+        authenticated: true,
+        isNewAccount: false,
+        linkedFromOAuth: true,
+        token,
+        operator,
+        storage: store.getStorageArchitectureSummary(operator.id),
+      });
+      return;
+    }
+
+    if (!verifyPasswordScrypt(rawPass, account.passwordScrypt)) {
       res.status(401).json({
         error: 'Invalid email or password.',
       });
@@ -521,6 +633,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
     res.json({
       authenticated: true,
+      isNewAccount: false,
       token,
       operator,
       storage: store.getStorageArchitectureSummary(operator.id),
@@ -557,6 +670,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
     res.json({
       authenticated: true,
+      isNewAccount: !ws.tutorialCompleted,
       token,
       operator,
       storage: store.getStorageArchitectureSummary(operator.id),
@@ -671,13 +785,14 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const email = profile.email.trim().toLowerCase();
       const fullName = (profile.name || email.split('@')[0]).trim();
       const org = (profile.hd || 'Google Verified Workspace').trim();
+      const isFirstOAuthSignup = !store.getUserByEmail(email);
 
       const upserted = store.upsertOAuthUser({
         email,
         fullName,
         organization: org,
         role: 'TREASURY_OPERATOR',
-        paypalMerchantId: `SBX-GOOGLE-${sha256Hex(email).slice(0, 6).toUpperCase()}`,
+        paypalMerchantId: `SBX-MERCH-${sha256Hex(email).slice(0, 6).toUpperCase()}`,
       });
 
       const { token, operator } = issueOperatorSession(upserted, 'GOOGLE_OAUTH');
@@ -697,7 +812,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       });
 
       // Security: Session is delivered strictly via HttpOnly cookie — NEVER leak tokens in URL query strings!
-      res.redirect('/?auth_ready=1');
+      res.redirect(isFirstOAuthSignup ? '/?auth_ready=1&first_signup=1' : '/?auth_ready=1');
     } catch {
       res.redirect('/?auth_error=google_callback_failed');
     }
@@ -745,13 +860,14 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const resolvedEmail = payload.email.trim().toLowerCase();
       const resolvedName = (payload.name || resolvedEmail.split('@')[0]).trim();
       const resolvedOrg = (payload.hd || 'Google Identity Verified').trim();
+      const isFirstOAuthSignup = !store.getUserByEmail(resolvedEmail);
 
       const upserted = store.upsertOAuthUser({
         email: resolvedEmail,
         fullName: resolvedName,
         organization: resolvedOrg,
         role: 'TREASURY_OPERATOR',
-        paypalMerchantId: `SBX-GOOGLE-${sha256Hex(resolvedEmail).slice(0, 6).toUpperCase()}`,
+        paypalMerchantId: `SBX-MERCH-${sha256Hex(resolvedEmail).slice(0, 6).toUpperCase()}`,
       });
 
       const { token, operator } = issueOperatorSession(upserted, 'GOOGLE_OAUTH');
@@ -772,6 +888,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
       res.json({
         authenticated: true,
+        isNewAccount: isFirstOAuthSignup,
         token,
         operator,
         storage: store.getStorageArchitectureSummary(operator.id),

@@ -715,8 +715,22 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
     expect(regRes.status).toBe(201);
     const regData = await regRes.json();
     expect(regData.authenticated).toBe(true);
+    expect(regData.isNewAccount).toBe(true);
     expect(regData.operator.email).toBe('treasury-lead@aegispay.io');
     expect(regData.token).toContain('aegis_sess_');
+
+    // Subsequent login for same user returns isNewAccount: false (so tutorial never repeats)
+    const reloginRes = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'treasury-lead@aegispay.io',
+        password: 'SecurePassword2026!',
+      }),
+    });
+    expect(reloginRes.status).toBe(200);
+    const reloginData = await reloginRes.json();
+    expect(reloginData.isNewAccount).toBe(false);
 
     const dupRes = await fetch(`${baseUrl}/api/auth/register`, {
       method: 'POST',
@@ -727,6 +741,113 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
       }),
     });
     expect(dupRes.status).toBe(409);
+    const dupData = await dupRes.json();
+    expect(dupData.code).toBe('EMAIL_PASSWORD_ALREADY_REGISTERED');
+  });
+
+  it('seamlessly unifies Google OAuth and Email/Password accounts in both directions while preserving tenant workspace data', async () => {
+    const unifiedStorePath = path.join(
+      os.tmpdir(),
+      `aegispay_oauth_unify_${process.pid}_${Date.now()}.json`
+    );
+    const seedStore = new AegisMultiTenantStore({
+      rootDir: os.tmpdir(),
+      customFilePath: unifiedStorePath,
+    });
+
+    // 1. User A registers first via Google OAuth (hasPassword === false)
+    const oauthUserA = seedStore.upsertOAuthUser({
+      email: 'oauth-first@studio.io',
+      fullName: 'OAuth First Founder',
+      organization: 'Studio Alpha',
+      role: 'TREASURY_OPERATOR',
+      paypalMerchantId: 'SBX-GOOGLE-LEGACY1',
+    });
+    expect(oauthUserA.hasPassword).toBe(false);
+
+    // Add a custom milestone plan to User A's workspace to verify data preservation after linking
+    const wsA = seedStore.getTenantWorkspace(oauthUserA.id, oauthUserA.email);
+    wsA.currentCheckingBalanceCents = 777000;
+
+    // 2. User B registers first via Google OAuth (will link directly via /api/auth/login)
+    seedStore.upsertOAuthUser({
+      email: 'oauth-login-link@studio.io',
+      fullName: 'OAuth Direct Login User',
+      organization: 'Studio Beta',
+      role: 'TREASURY_OPERATOR',
+      paypalMerchantId: 'SBX-MERCH-BETA01',
+    });
+
+    await seedStore.flushAsync();
+
+    const unifiedApp = createAegisServer({ customStoreFilePath: unifiedStorePath });
+    let unifiedServer!: Server;
+    let unifiedUrl = '';
+    await new Promise<void>((resolve) => {
+      unifiedServer = unifiedApp.listen(0, () => {
+        const addr = unifiedServer.address();
+        if (addr && typeof addr === 'object') {
+          unifiedUrl = `http://127.0.0.1:${addr.port}`;
+        }
+        resolve();
+      });
+    });
+
+    try {
+      // Direction 1A: OAuth user submits Create Account (/api/auth/register) with same email -> links password seamlessly!
+      const linkRegRes = await fetch(`${unifiedUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'oauth-first@studio.io',
+          password: 'LinkedPassword2026!',
+          fullName: 'OAuth First Founder',
+          organization: 'Studio Alpha',
+        }),
+      });
+      expect(linkRegRes.status).toBe(200);
+      const linkRegData = await linkRegRes.json();
+      expect(linkRegData.authenticated).toBe(true);
+      expect(linkRegData.linkedFromOAuth).toBe(true);
+      expect(linkRegData.isNewAccount).toBe(false);
+      expect(linkRegData.operator.id).toBe(oauthUserA.id);
+
+      // Verify workspace data (custom $7,770 balance) was preserved seamlessly
+      const stateARes = await fetch(`${unifiedUrl}/api/state`, {
+        headers: { Authorization: `Bearer ${linkRegData.token}` },
+      });
+      const stateAData = await stateARes.json();
+      expect(stateAData.lupa.currentCheckingBalanceCents).toBe(777000);
+
+      // Subsequent /api/auth/login with that linked password works cleanly
+      const loginARes = await fetch(`${unifiedUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'oauth-first@studio.io',
+          password: 'LinkedPassword2026!',
+        }),
+      });
+      expect(loginARes.status).toBe(200);
+
+      // Direction 1B: OAuth user submits Sign In (/api/auth/login) directly with 8+ char password -> links & signs in!
+      const linkLoginRes = await fetch(`${unifiedUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: 'oauth-login-link@studio.io',
+          password: 'DirectLinkPass2026!',
+        }),
+      });
+      expect(linkLoginRes.status).toBe(200);
+      const linkLoginData = await linkLoginRes.json();
+      expect(linkLoginData.authenticated).toBe(true);
+      expect(linkLoginData.linkedFromOAuth).toBe(true);
+      expect(linkLoginData.isNewAccount).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => unifiedServer.close(() => resolve()));
+      if (fs.existsSync(unifiedStorePath)) fs.unlinkSync(unifiedStorePath);
+    }
   });
 
   it('GET /api/auth/me & POST /api/auth/logout validate and revoke stateless HMAC bearer session tokens', async () => {

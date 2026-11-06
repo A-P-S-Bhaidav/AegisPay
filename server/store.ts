@@ -31,6 +31,8 @@ export interface StoredUserRecord {
   organization: string;
   role: AuthenticatedOperator['role'];
   passwordScrypt: string;
+  hasPassword?: boolean;
+  authProviders?: Array<AuthenticatedOperator['authProvider']>;
   paypalMerchantId: string;
   createdAtIso: string;
   lastLoginAtIso: string;
@@ -424,6 +426,8 @@ export class AegisMultiTenantStore {
         organization: 'AegisPay Sandbox Account',
         role: 'PRINCIPAL_ARCHITECT',
         passwordScrypt: hashPasswordScrypt('AegisPay2026!', demoSalt),
+        hasPassword: true,
+        authProviders: ['EMAIL_PASSWORD'],
         paypalMerchantId: 'SBX-MERCH-AEGIS-01',
         createdAtIso: now,
         lastLoginAtIso: now,
@@ -439,6 +443,8 @@ export class AegisMultiTenantStore {
         organization: 'PayPal Sandbox Demo',
         role: 'DEMO_OPERATOR',
         passwordScrypt: hashPasswordScrypt(crypto.randomBytes(24).toString('hex')),
+        hasPassword: false,
+        authProviders: ['DEMO_SANDBOX'],
         paypalMerchantId: 'SBX-DEMO-GUEST-01',
         createdAtIso: now,
         lastLoginAtIso: now,
@@ -459,7 +465,25 @@ export class AegisMultiTenantStore {
       if (Array.isArray(parsed.users)) {
         for (const u of parsed.users) {
           if (u?.email && u?.passwordScrypt) {
-            this.usersByEmail.set(u.email.toLowerCase(), u);
+            const normalizedEmail = u.email.toLowerCase();
+            const isDemo = normalizedEmail === 'demo@aegispay.io' || u.role === 'DEMO_OPERATOR';
+            const isLegacyOAuthOnly = String(u.paypalMerchantId || '').startsWith('SBX-GOOGLE-');
+            const inferredHasPassword =
+              typeof u.hasPassword === 'boolean' ? u.hasPassword : !isDemo && !isLegacyOAuthOnly;
+            const inferredProviders =
+              Array.isArray(u.authProviders) && u.authProviders.length > 0
+                ? u.authProviders
+                : isDemo
+                  ? (['DEMO_SANDBOX'] as const)
+                  : isLegacyOAuthOnly
+                    ? (['GOOGLE_OAUTH'] as const)
+                    : (['EMAIL_PASSWORD'] as const);
+            this.usersByEmail.set(normalizedEmail, {
+              ...u,
+              email: normalizedEmail,
+              hasPassword: inferredHasPassword,
+              authProviders: [...inferredProviders],
+            });
           }
         }
       }
@@ -556,6 +580,8 @@ export class AegisMultiTenantStore {
       organization: params.organization.trim() || 'PayPal Workspace',
       role: params.role || 'TREASURY_OPERATOR',
       passwordScrypt: hashPasswordScrypt(params.rawPassword),
+      hasPassword: true,
+      authProviders: ['EMAIL_PASSWORD'],
       paypalMerchantId: `SBX-MERCH-${sha256Hex(normalizedEmail).slice(0, 6).toUpperCase()}`,
       createdAtIso: now,
       lastLoginAtIso: now,
@@ -563,6 +589,33 @@ export class AegisMultiTenantStore {
     this.usersByEmail.set(normalizedEmail, record);
     await this.flushAsync();
     return record;
+  }
+
+  public async linkPasswordToUser(params: {
+    email: string;
+    rawPassword: string;
+    fullName?: string;
+    organization?: string;
+  }): Promise<StoredUserRecord | undefined> {
+    const normalizedEmail = params.email.trim().toLowerCase();
+    const existing = this.usersByEmail.get(normalizedEmail);
+    if (!existing) return undefined;
+    existing.passwordScrypt = hashPasswordScrypt(params.rawPassword);
+    existing.hasPassword = true;
+    const providers = new Set<AuthenticatedOperator['authProvider']>(
+      existing.authProviders || ['GOOGLE_OAUTH']
+    );
+    providers.add('EMAIL_PASSWORD');
+    existing.authProviders = Array.from(providers);
+    if (params.fullName && params.fullName.trim()) {
+      existing.fullName = params.fullName.trim();
+    }
+    if (params.organization && params.organization.trim()) {
+      existing.organization = params.organization.trim();
+    }
+    existing.lastLoginAtIso = new Date().toISOString();
+    await this.flushAsync();
+    return existing;
   }
 
   public upsertOAuthUser(params: {
@@ -577,7 +630,14 @@ export class AegisMultiTenantStore {
     const now = new Date().toISOString();
     if (existing) {
       existing.lastLoginAtIso = now;
-      existing.fullName = params.fullName || existing.fullName;
+      if (!existing.fullName && params.fullName) {
+        existing.fullName = params.fullName;
+      }
+      const providers = new Set<AuthenticatedOperator['authProvider']>(
+        existing.authProviders || (existing.hasPassword ? ['EMAIL_PASSWORD'] : [])
+      );
+      providers.add('GOOGLE_OAUTH');
+      existing.authProviders = Array.from(providers);
       this.scheduleFlush();
       return existing;
     }
@@ -588,6 +648,8 @@ export class AegisMultiTenantStore {
       organization: params.organization,
       role: params.role,
       passwordScrypt: hashPasswordScrypt(crypto.randomBytes(24).toString('hex')),
+      hasPassword: false,
+      authProviders: ['GOOGLE_OAUTH'],
       paypalMerchantId: params.paypalMerchantId,
       createdAtIso: now,
       lastLoginAtIso: now,

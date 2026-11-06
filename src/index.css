@@ -182,126 +182,227 @@ pre,
 }
 
 /* ==========================================================================
-   BUTTONS & INPUT CONTROLS (ZERO NEUMORPHISM)
+   BUTTONS & INPUT CONTROLS (ZERO NEUMORPHISM, LAYERED FOR TAILWIND OVERRIDES)
    ========================================================================== */
 
-.btn-acid {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  background-color: #ccff00;
-  color: #050507;
-  border: 1.5px solid #ccff00;
-  border-radius: 2px;
-  font-family: 'Space Grotesk', 'Inter', sans-serif;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  box-shadow: 3px 3px 0px #0047ff;
-  transition:
-    transform 0.14s cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 0.14s cubic-bezier(0.16, 1, 0.3, 1),
-    background-color 0.14s ease,
-    opacity 0.14s ease;
+@layer components {
+  .btn-acid {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    background-color: #ccff00;
+    color: #050507;
+    border: 1.5px solid #ccff00;
+    border-radius: 2px;
+    font-family: 'Space Grotesk', 'Inter', sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    box-shadow: 3px 3px 0px #0047ff;
+    transition:
+      transform 0.14s cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 0.14s cubic-bezier(0.16, 1, 0.3, 1),
+      background-color 0.14s ease,
+      opacity 0.14s ease;
+  }
+
+  .btn-acid:hover:not(:disabled) {
+    background-color: #d8ff33;
+    transform: translate3d(-1.5px, -1.5px, 0);
+    box-shadow: 5px 5px 0px #0047ff;
+  }
+
+  .btn-acid:active:not(:disabled) {
+    transform: translate3d(1px, 1px, 0);
+    box-shadow: 1px 1px 0px #0047ff;
+  }
+
+  .btn-acid:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-cobalt {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    background-color: #0047ff;
+    color: #f8fafc;
+    border: 1.5px solid #2962ff;
+    border-radius: 2px;
+    font-family: 'Space Grotesk', 'Inter', sans-serif;
+    font-weight: 600;
+    box-shadow: 3px 3px 0px #ccff00;
+    transition:
+      transform 0.14s cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 0.14s cubic-bezier(0.16, 1, 0.3, 1),
+      background-color 0.14s ease,
+      opacity 0.14s ease;
+  }
+
+  .btn-cobalt:hover:not(:disabled) {
+    background-color: #1f5eff;
+    transform: translate3d(-1.5px, -1.5px, 0);
+    box-shadow: 5px 5px 0px #ccff00;
+  }
+
+  .btn-cobalt:active:not(:disabled) {
+    transform: translate3d(1px, 1px, 0);
+    box-shadow: 1px 1px 0px #ccff00;
+  }
+
+  .btn-cobalt:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-ghost-brutal {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    background-color: rgba(12, 16, 25, 0.85);
+    color: #e2e8f0;
+    border: 1px solid #242e46;
+    border-radius: 2px;
+    font-weight: 600;
+    transition:
+      border-color 0.15s ease,
+      color 0.15s ease,
+      background-color 0.15s ease,
+      transform 0.15s ease;
+  }
+
+  .btn-ghost-brutal:hover:not(:disabled) {
+    border-color: #0047ff;
+    color: #ccff00;
+    background-color: rgba(0, 71, 255, 0.12);
+  }
+
+  .btn-ghost-brutal:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .input-brutal {
+    width: 100%;
+    min-width: 0;
+    background-color: rgba(6, 8, 14, 0.92);
+    border: 1px solid #222b42;
+    border-radius: 2px;
+    padding: 0.55rem 0.75rem;
+    font-size: 0.875rem;
+    color: #f8fafc;
+    transition:
+      border-color 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+
+  .input-brutal:focus {
+    outline: none;
+    border-color: #0047ff;
+    box-shadow: 2px 2px 0px #ccff00;
+  }
+
+  /* Dedicated non-overlapping icon + input shell for Sign In & Create Account */
+  .auth-input-shell {
+    display: flex;
+    align-items: stretch;
+    width: 100%;
+    min-height: 2.85rem;
+    background-color: rgba(6, 8, 14, 0.95);
+    border: 1px solid #222b42;
+    border-radius: 2px;
+    overflow: hidden;
+    transition:
+      border-color 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+
+  .auth-input-shell:focus-within {
+    border-color: #0047ff;
+    box-shadow: 2px 2px 0px #ccff00;
+  }
+
+  .auth-input-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.75rem;
+    flex-shrink: 0;
+    background-color: rgba(10, 14, 24, 0.92);
+    border-right: 1px solid #1b2234;
+    color: #94a3b8;
+    pointer-events: none;
+    transition:
+      color 0.15s ease,
+      background-color 0.15s ease,
+      border-color 0.15s ease;
+  }
+
+  .auth-input-shell:focus-within .auth-input-icon {
+    color: #ccff00;
+    background-color: rgba(0, 71, 255, 0.14);
+    border-right-color: rgba(0, 71, 255, 0.55);
+  }
+
+  .auth-input-control {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+    background: transparent;
+    border: 0;
+    padding: 0.65rem 0.85rem;
+    font-size: 0.9rem;
+    line-height: 1.35;
+    color: #f8fafc;
+  }
+
+  .auth-input-control:focus {
+    outline: none;
+  }
+
+  .auth-input-control::placeholder {
+    color: #64748b;
+  }
+
+  .auth-input-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.75rem;
+    flex-shrink: 0;
+    background: transparent;
+    border: 0;
+    border-left: 1px solid #1b2234;
+    color: #94a3b8;
+    cursor: pointer;
+    transition:
+      color 0.15s ease,
+      background-color 0.15s ease;
+  }
+
+  .auth-input-toggle:hover {
+    color: #ccff00;
+    background-color: rgba(0, 71, 255, 0.12);
+  }
 }
 
-.btn-acid:hover:not(:disabled) {
-  background-color: #d8ff33;
-  transform: translate3d(-1.5px, -1.5px, 0);
-  box-shadow: 5px 5px 0px #0047ff;
+@media (pointer: coarse) {
+  .auth-input-control {
+    font-size: 1rem;
+  }
 }
 
-.btn-acid:active:not(:disabled) {
-  transform: translate3d(1px, 1px, 0);
-  box-shadow: 1px 1px 0px #0047ff;
-}
-
-.btn-acid:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.btn-cobalt {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  background-color: #0047ff;
-  color: #f8fafc;
-  border: 1.5px solid #2962ff;
-  border-radius: 2px;
-  font-family: 'Space Grotesk', 'Inter', sans-serif;
-  font-weight: 600;
-  box-shadow: 3px 3px 0px #ccff00;
-  transition:
-    transform 0.14s cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 0.14s cubic-bezier(0.16, 1, 0.3, 1),
-    background-color 0.14s ease,
-    opacity 0.14s ease;
-}
-
-.btn-cobalt:hover:not(:disabled) {
-  background-color: #1f5eff;
-  transform: translate3d(-1.5px, -1.5px, 0);
-  box-shadow: 5px 5px 0px #ccff00;
-}
-
-.btn-cobalt:active:not(:disabled) {
-  transform: translate3d(1px, 1px, 0);
-  box-shadow: 1px 1px 0px #ccff00;
-}
-
-.btn-cobalt:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.btn-ghost-brutal {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.45rem;
-  background-color: rgba(12, 16, 25, 0.85);
-  color: #e2e8f0;
-  border: 1px solid #242e46;
-  border-radius: 2px;
-  font-weight: 600;
-  transition:
-    border-color 0.15s ease,
-    color 0.15s ease,
-    background-color 0.15s ease,
-    transform 0.15s ease;
-}
-
-.btn-ghost-brutal:hover:not(:disabled) {
-  border-color: #0047ff;
-  color: #ccff00;
-  background-color: rgba(0, 71, 255, 0.12);
-}
-
-.btn-ghost-brutal:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.input-brutal {
-  width: 100%;
-  min-width: 0;
-  background-color: rgba(6, 8, 14, 0.92);
-  border: 1px solid #222b42;
-  border-radius: 2px;
-  padding: 0.55rem 0.75rem;
-  font-size: 0.84rem;
-  color: #f8fafc;
-  transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease;
-}
-
-.input-brutal:focus {
-  outline: none;
-  border-color: #0047ff;
-  box-shadow: 2px 2px 0px #ccff00;
+/* Keep dark midnight styling intact when browsers autofill saved credentials */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #f8fafc;
+  -webkit-box-shadow: 0 0 0px 1000px #06080e inset;
+  caret-color: #ccff00;
+  transition: background-color 9999s ease-in-out 0s;
 }
 
 input[type='range'] {

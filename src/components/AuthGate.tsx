@@ -1,11 +1,22 @@
 import React, { useState } from 'react';
-import { ArrowLeft, ArrowRight, Lock, Mail, Play, ShieldCheck } from 'lucide-react';
+import {
+  ArrowLeft,
+  ArrowRight,
+  Building2,
+  Eye,
+  EyeOff,
+  Lock,
+  Mail,
+  Play,
+  ShieldCheck,
+  User,
+} from 'lucide-react';
 import { AegisBrandMark, apiFetch } from '../api';
 
 interface AuthGateProps {
   initialMode?: 'login' | 'register';
   authErrorBanner?: string;
-  onAuthenticated: () => Promise<void>;
+  onAuthenticated: (meta?: { isNewAccount?: boolean }) => Promise<void>;
   onBackToLanding: () => void;
   onLaunchDemo: () => Promise<void>;
 }
@@ -20,6 +31,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   const [mode, setMode] = useState<'login' | 'register'>(initialMode);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [fullName, setFullName] = useState('');
   const [organization, setOrganization] = useState('');
   const [loading, setLoading] = useState(false);
@@ -55,17 +67,40 @@ export const AuthGate: React.FC<AuthGateProps> = ({
     setLoading(true);
     try {
       if (mode === 'register') {
-        await apiFetch('/api/auth/register', {
-          method: 'POST',
-          body: JSON.stringify({ email, password, fullName, organization }),
-        });
+        try {
+          const regRes = await apiFetch<{ isNewAccount?: boolean }>('/api/auth/register', {
+            method: 'POST',
+            body: JSON.stringify({ email, password, fullName, organization }),
+          });
+          await onAuthenticated({ isNewAccount: Boolean(regRes.isNewAccount) });
+          return;
+        } catch (regErr: any) {
+          // If an email+password account already exists, seamlessly try signing in with the entered credentials
+          if (regErr?.status === 409 && regErr?.data?.code === 'EMAIL_PASSWORD_ALREADY_REGISTERED') {
+            try {
+              await apiFetch('/api/auth/login', {
+                method: 'POST',
+                body: JSON.stringify({ email, password }),
+              });
+              await onAuthenticated({ isNewAccount: false });
+              return;
+            } catch {
+              setMode('login');
+              setError(
+                'Welcome back — an account with this email already exists. Enter your existing password to sign in, or click Continue with Google.'
+              );
+              return;
+            }
+          }
+          throw regErr;
+        }
       } else {
         await apiFetch('/api/auth/login', {
           method: 'POST',
           body: JSON.stringify({ email, password }),
         });
+        await onAuthenticated({ isNewAccount: false });
       }
-      await onAuthenticated();
     } catch (err) {
       setError((err as Error).message || 'Authentication failed.');
     } finally {
@@ -108,15 +143,15 @@ export const AuthGate: React.FC<AuthGateProps> = ({
         <div className="lg:col-span-5 glass-brutal-panel corner-ticks p-6 sm:p-8 flex flex-col justify-between gap-6">
           <div className="space-y-4">
             <div className="inline-flex items-center gap-2 text-xs font-mono uppercase text-[#CCFF00] px-2.5 py-1 bg-[#0047FF]/20 border border-[#0047FF]/60">
-              <ShieldCheck className="w-4 h-4" />
+              <ShieldCheck className="w-4 h-4 shrink-0" />
               Private Account Workspace
             </div>
             <h1 className="font-display text-2xl sm:text-3xl font-bold text-white leading-tight">
               Sign in to manage your PayPal safety &amp; billing
             </h1>
             <p className="text-sm text-slate-300 leading-relaxed">
-              Every account gets its own isolated workspace for invoice checks, subscription
-              limits, failed-payment recovery, and milestone PayPal invoices.
+              Use Google or Email interchangeably with the same address—your isolated workspace,
+              invoice checks, subscription limits, and milestone plans stay synced.
             </p>
           </div>
 
@@ -125,8 +160,8 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               Want to explore right away?
             </div>
             <p className="text-xs text-slate-300 leading-relaxed">
-              Open an isolated guest workspace pre-loaded with sample orders and a 5-step
-              interactive walkthrough.
+              Open an isolated guest workspace pre-loaded with sample orders and an optional
+              guided walkthrough.
             </p>
             <button
               type="button"
@@ -134,7 +169,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               disabled={loading}
               className="btn-acid w-full py-2.5 text-xs sm:text-sm"
             >
-              <Play className="w-4 h-4 fill-current" />
+              <Play className="w-4 h-4 fill-current shrink-0" />
               Launch Guided Demo Workspace
             </button>
           </div>
@@ -176,6 +211,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
           {error && (
             <div
               role="alert"
+              aria-live="polite"
               className="p-3.5 bg-red-950/50 border border-red-500/60 text-xs text-red-200 leading-relaxed"
             >
               {error}
@@ -189,7 +225,13 @@ export const AuthGate: React.FC<AuthGateProps> = ({
             disabled={loading}
             className="w-full py-3 px-4 bg-white text-[#050507] font-display font-bold text-sm border-2 border-white hover:bg-slate-100 transition-all flex items-center justify-center gap-3 shadow-[3px_3px_0px_#0047FF]"
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              className="shrink-0"
+            >
               <path
                 fill="#4285F4"
                 d="M23.49 12.27c0-.79-.07-1.54-.2-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82z"
@@ -207,7 +249,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
                 d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96z"
               />
             </svg>
-            Continue with Google
+            <span>Continue with Google</span>
           </button>
 
           <div className="relative flex items-center py-1">
@@ -218,65 +260,137 @@ export const AuthGate: React.FC<AuthGateProps> = ({
             <div className="flex-grow border-t border-[#1B2234]" />
           </div>
 
-          <form onSubmit={handleEmailSubmit} className="space-y-3.5">
+          <form onSubmit={handleEmailSubmit} method="post" className="space-y-4">
             {mode === 'register' && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">Full Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={fullName}
-                    onChange={(e) => setFullName(e.target.value)}
-                    placeholder="Alex Morgan"
-                    className="input-brutal"
-                  />
+                  <label
+                    htmlFor="auth-full-name"
+                    className="block text-xs font-medium text-slate-300 mb-1.5"
+                  >
+                    Full Name
+                  </label>
+                  <div className="auth-input-shell">
+                    <span className="auth-input-icon" aria-hidden="true">
+                      <User className="w-4 h-4 shrink-0" />
+                    </span>
+                    <input
+                      id="auth-full-name"
+                      name="name"
+                      type="text"
+                      required
+                      autoComplete="name"
+                      value={fullName}
+                      onChange={(e) => {
+                        setFullName(e.target.value);
+                        if (error) setError('');
+                      }}
+                      placeholder="Alex Morgan"
+                      className="auth-input-control"
+                    />
+                  </div>
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                  <label
+                    htmlFor="auth-organization"
+                    className="block text-xs font-medium text-slate-300 mb-1.5"
+                  >
                     Business or Team Name
                   </label>
-                  <input
-                    type="text"
-                    value={organization}
-                    onChange={(e) => setOrganization(e.target.value)}
-                    placeholder="Morgan Design Studio"
-                    className="input-brutal"
-                  />
+                  <div className="auth-input-shell">
+                    <span className="auth-input-icon" aria-hidden="true">
+                      <Building2 className="w-4 h-4 shrink-0" />
+                    </span>
+                    <input
+                      id="auth-organization"
+                      name="organization"
+                      type="text"
+                      autoComplete="organization"
+                      value={organization}
+                      onChange={(e) => {
+                        setOrganization(e.target.value);
+                        if (error) setError('');
+                      }}
+                      placeholder="Morgan Design Studio"
+                      className="auth-input-control"
+                    />
+                  </div>
                 </div>
               </div>
             )}
 
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Email Address</label>
-              <div className="relative">
+              <label
+                htmlFor="auth-email"
+                className="block text-xs font-medium text-slate-300 mb-1.5"
+              >
+                Email Address
+              </label>
+              <div className="auth-input-shell">
+                <span className="auth-input-icon" aria-hidden="true">
+                  <Mail className="w-4 h-4 shrink-0" />
+                </span>
                 <input
+                  id="auth-email"
+                  name="email"
                   type="email"
                   required
+                  autoComplete="username"
+                  spellCheck={false}
+                  enterKeyHint="next"
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    if (error) setError('');
+                  }}
                   placeholder="you@company.com"
-                  className="input-brutal pl-9"
+                  className="auth-input-control"
                 />
-                <Mail className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
+              <label
+                htmlFor="auth-password"
+                className="block text-xs font-medium text-slate-300 mb-1.5"
+              >
                 Password {mode === 'register' && '(minimum 8 characters)'}
               </label>
-              <div className="relative">
+              <div className="auth-input-shell">
+                <span className="auth-input-icon" aria-hidden="true">
+                  <Lock className="w-4 h-4 shrink-0" />
+                </span>
                 <input
-                  type="password"
+                  id="auth-password"
+                  name="password"
+                  type={showPassword ? 'text' : 'password'}
                   required
                   minLength={8}
+                  autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+                  enterKeyHint="done"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter your password"
-                  className="input-brutal pl-9"
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    if (error) setError('');
+                  }}
+                  placeholder={
+                    mode === 'register' ? 'Create an 8+ character password' : 'Enter your password'
+                  }
+                  className="auth-input-control"
                 />
-                <Lock className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showPassword}
+                  className="auth-input-toggle"
+                >
+                  {showPassword ? (
+                    <EyeOff className="w-4 h-4 shrink-0" />
+                  ) : (
+                    <Eye className="w-4 h-4 shrink-0" />
+                  )}
+                </button>
               </div>
             </div>
 
@@ -285,12 +399,14 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               disabled={loading}
               className="btn-cobalt w-full py-3 text-sm mt-2"
             >
-              {loading
-                ? 'Signing In...'
-                : mode === 'register'
-                  ? 'Create Account & Open Workspace'
-                  : 'Sign In to Workspace'}
-              <ArrowRight className="w-4 h-4" />
+              <span>
+                {loading
+                  ? 'Signing In...'
+                  : mode === 'register'
+                    ? 'Create Account & Open Workspace'
+                    : 'Sign In to Workspace'}
+              </span>
+              <ArrowRight className="w-4 h-4 shrink-0" />
             </button>
           </form>
         </div>

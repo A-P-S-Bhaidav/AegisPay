@@ -42,13 +42,41 @@ export function App() {
     return ws;
   }, []);
 
+  const hasSeenTourLocally = useCallback((operatorId?: string, email?: string) => {
+    try {
+      if (operatorId && localStorage.getItem(`aegispay_tour_seen_${operatorId}`) === '1') {
+        return true;
+      }
+      if (email && localStorage.getItem(`aegispay_tour_seen_${email.toLowerCase()}`) === '1') {
+        return true;
+      }
+    } catch {
+      // Ignore storage access restrictions
+    }
+    return false;
+  }, []);
+
+  const markTourSeen = useCallback((operatorId?: string, email?: string) => {
+    try {
+      if (operatorId) localStorage.setItem(`aegispay_tour_seen_${operatorId}`, '1');
+      if (email) localStorage.setItem(`aegispay_tour_seen_${email.toLowerCase()}`, '1');
+    } catch {
+      // Ignore storage access restrictions
+    }
+    void apiFetch('/api/workspace/tutorial', {
+      method: 'POST',
+      body: JSON.stringify({ completed: true }),
+    }).catch(() => {});
+  }, []);
+
   // Initial session check (strictly HttpOnly cookie — zero localStorage tokens)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const errParam = params.get('auth_error');
     const readyParam = params.get('auth_ready');
+    const isFirstOAuthSignup = params.get('first_signup') === '1';
 
-    if (errParam || readyParam) {
+    if (errParam || readyParam || isFirstOAuthSignup) {
       window.history.replaceState({}, '', window.location.pathname);
     }
     if (errParam) {
@@ -61,9 +89,15 @@ export function App() {
         await apiFetch('/api/auth/me');
         const ws = await loadWorkspaceState();
         setScreen('workspace');
-        if (!ws.workspace.tutorialCompleted) {
+        // Strictly show tutorial ONLY on first-time OAuth sign-up, never on returning logins or reloads
+        if (
+          isFirstOAuthSignup &&
+          !ws.workspace.tutorialCompleted &&
+          !hasSeenTourLocally(ws.operator?.id, ws.operator?.email)
+        ) {
           setTourStep(0);
           setTourOpen(true);
+          markTourSeen(ws.operator?.id, ws.operator?.email);
         }
       } catch {
         // Unauthenticated visitor stays on landing or auth screen
@@ -71,7 +105,7 @@ export function App() {
         setBooting(false);
       }
     })();
-  }, [loadWorkspaceState]);
+  }, [hasSeenTourLocally, loadWorkspaceState, markTourSeen]);
 
   // Register progressive Chromium WebMCP tools when authenticated
   useEffect(() => {
@@ -89,29 +123,42 @@ export function App() {
     );
   }, [screen]);
 
-  const handleAuthenticated = async () => {
+  const handleAuthenticated = async (meta?: { isNewAccount?: boolean }) => {
     const ws = await loadWorkspaceState();
     setInVerificationLab(false);
     setSection('overview');
     setScreen('workspace');
-    if (!ws.workspace.tutorialCompleted) {
+    // Strictly show tutorial ONLY on first sign-up (isNewAccount === true), never on returning logins
+    if (
+      meta?.isNewAccount &&
+      !ws.workspace.tutorialCompleted &&
+      !hasSeenTourLocally(ws.operator?.id, ws.operator?.email)
+    ) {
       setTourStep(0);
       setTourOpen(true);
+      markTourSeen(ws.operator?.id, ws.operator?.email);
     }
   };
 
   const handleLaunchDemo = async () => {
     setDemoLoading(true);
     try {
-      await apiFetch('/api/auth/demo', { method: 'POST' });
+      const demoAuth = await apiFetch<{ isNewAccount?: boolean }>('/api/auth/demo', {
+        method: 'POST',
+      });
       const ws = await loadWorkspaceState();
       setInVerificationLab(false);
       setSection('overview');
       setScreen('workspace');
-      // Always launch interactive guided tour for demo visitors if not dismissed yet
-      if (!ws.workspace.tutorialCompleted) {
+      // Show guided tour only on the very first demo visit (never annoyingly repeat)
+      if (
+        demoAuth.isNewAccount !== false &&
+        !ws.workspace.tutorialCompleted &&
+        !hasSeenTourLocally(ws.operator?.id, ws.operator?.email)
+      ) {
         setTourStep(0);
         setTourOpen(true);
+        markTourSeen(ws.operator?.id, ws.operator?.email);
       }
     } finally {
       setDemoLoading(false);
@@ -139,14 +186,7 @@ export function App() {
 
   const handleFinishOrSkipTour = async () => {
     setTourOpen(false);
-    try {
-      await apiFetch('/api/workspace/tutorial', {
-        method: 'POST',
-        body: JSON.stringify({ completed: true }),
-      });
-    } catch {
-      // Non-fatal
-    }
+    markTourSeen(state?.operator?.id, state?.operator?.email);
   };
 
   const handleRunTourSampleAction = async (stepId: string) => {
