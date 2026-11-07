@@ -3831,10 +3831,21 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         customerNote,
         imageBase64,
         imageMimeType,
+        requirePhotoEvidence,
         simulateReplayAttack,
         merchantPolicyOverride,
         policyOverride,
       } = req.body || {};
+
+      if (
+        requirePhotoEvidence &&
+        (!imageBase64 || typeof imageBase64 !== 'string' || !imageBase64.trim())
+      ) {
+        return res.status(400).json({
+          error:
+            'Compulsory customer damage photo is required to evaluate and issue an instant partial refund.',
+        });
+      }
 
       let parsedNaturalInput: Awaited<
         ReturnType<typeof geminiEngine.parseNaturalDamageClaim>

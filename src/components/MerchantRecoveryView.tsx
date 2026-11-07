@@ -102,6 +102,7 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
   const [uploadedPhotoBase64, setUploadedPhotoBase64] = useState<string | undefined>(undefined);
   const [uploadedPhotoMime, setUploadedPhotoMime] = useState<string | undefined>(undefined);
   const [uploadedPhotoName, setUploadedPhotoName] = useState<string>('');
+  const [photoRequiredError, setPhotoRequiredError] = useState<string>('');
   const [showPolicyEditor, setShowPolicyEditor] = useState(false);
   const [minorRefundPct, setMinorRefundPct] = useState('15');
   const [moderateRefundPct, setModerateRefundPct] = useState('30');
@@ -209,6 +210,7 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
     const file = e.target.files?.[0];
     if (!file) return;
     setUploadedPhotoName(file.name);
+    setPhotoRequiredError('');
     const reader = new FileReader();
     reader.onload = () => {
       const str = String(reader.result || '');
@@ -222,6 +224,13 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
   };
 
   const handleIssuePartialRefund = async (overrideNatural?: string) => {
+    if (!uploadedPhotoBase64) {
+      setPhotoRequiredError(
+        'Compulsory Photo Required: Please upload a customer item damage photo before calculating or issuing an instant partial refund.'
+      );
+      return;
+    }
+    setPhotoRequiredError('');
     setRefundLoading(true);
     try {
       const nlClaim = (overrideNatural ?? naturalDamageClaim).trim();
@@ -236,6 +245,7 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
           customerNote: customDamageNote,
           imageBase64: uploadedPhotoBase64,
           imageMimeType: uploadedPhotoMime,
+          requirePhotoEvidence: true,
           policyOverride: showPolicyEditor
             ? {
                 minorCosmeticRefundPct: Number(minorRefundPct) || 15,
@@ -252,6 +262,8 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
         setCustomDamageNote(res.parsedNaturalInput.customerNote);
       }
       await onRefresh();
+    } catch (err) {
+      setPhotoRequiredError((err as Error).message);
     } finally {
       setRefundLoading(false);
     }
@@ -653,7 +665,7 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
                   Instant Partial Refunds (Keep-the-Item)
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Describe any buyer damage claim, customize item &amp; price, or upload a photo.
+                  Describe any buyer damage claim, customize item &amp; price, and upload compulsory photo evidence.
                 </p>
               </div>
             </div>
@@ -789,16 +801,38 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
             </div>
           )}
 
-          <div>
-            <label className="block text-xs text-slate-400 mb-1">
-              Upload customer item photo {uploadedPhotoName ? `(${uploadedPhotoName})` : '(Optional)'}
-            </label>
+          <div
+            className={`p-3 border ${
+              photoRequiredError
+                ? 'bg-red-950/30 border-[#FF3366]'
+                : uploadedPhotoBase64
+                  ? 'bg-[#080B13] border-[#CCFF00]/60'
+                  : 'bg-[#080B13] border-[#243049]'
+            } space-y-1.5`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="block text-xs font-semibold text-white">
+                Upload Customer Item Photo{' '}
+                <span className="text-[#FF3366] font-mono text-[11px]">
+                  * COMPULSORY (Required for Vision Grading &amp; SHA-256 Anti-Replay)
+                </span>
+              </label>
+              {uploadedPhotoName && (
+                <span className="px-2 py-0.5 bg-[#CCFF00]/15 border border-[#CCFF00]/50 text-[#CCFF00] font-mono text-[10px]">
+                  VERIFIED PHOTO: {uploadedPhotoName}
+                </span>
+              )}
+            </div>
             <input
               type="file"
               accept="image/*"
+              required
               onChange={handlePhotoUpload}
               className="text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:border-0 file:bg-[#0047FF] file:text-white file:font-semibold"
             />
+            {photoRequiredError && (
+              <div className="text-xs font-mono text-[#FF3366] pt-1">{photoRequiredError}</div>
+            )}
           </div>
 
           <button
@@ -809,6 +843,12 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
           >
             {refundLoading ? 'Calculating Fair Refund...' : 'Calculate & Issue Partial Refund'}
           </button>
+
+          {refundResult?.error && !refundResult?.calculation && (
+            <div className="p-3 bg-red-950/30 border border-[#FF3366] text-xs font-mono text-[#FF3366]">
+              {refundResult.error}
+            </div>
+          )}
 
           {refundResult?.calculation && (
             <div className="p-4 bg-[#080B13] border border-[#CCFF00]/60 space-y-2 text-xs">

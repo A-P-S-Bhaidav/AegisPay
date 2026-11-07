@@ -1307,7 +1307,22 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
     expect(Array.isArray(cfData.commitments)).toBe(true);
     expect(cfData.commitments[0].name).toBe('Studio Loft Rent');
 
-    // 2. ClipRefund policyOverride & vision object
+    // 2. ClipRefund policyOverride, vision object & compulsory photo evidence enforcement
+    const clipMissingPhotoRes = await fetch(`${baseUrl}/api/cliprefund/evaluate-and-refund`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        presetId: 'MUG_RIM_CHIP',
+        itemTitle: 'Stoneware Mug',
+        originalOrderCents: 3200,
+        customerNote: 'Small rim chip on arrival',
+        requirePhotoEvidence: true,
+      }),
+    });
+    expect(clipMissingPhotoRes.status).toBe(400);
+    const clipMissingPhotoData = await clipMissingPhotoRes.json();
+    expect(clipMissingPhotoData.error).toContain('Compulsory customer damage photo');
+
     const clipRes = await fetch(`${baseUrl}/api/cliprefund/evaluate-and-refund`, {
       method: 'POST',
       headers: authHeaders,
@@ -1316,6 +1331,9 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
         itemTitle: 'Stoneware Mug',
         originalOrderCents: 3200,
         customerNote: 'Small rim chip on arrival',
+        requirePhotoEvidence: true,
+        imageBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        imageMimeType: 'image/png',
         policyOverride: {
           minorCosmeticRefundPct: 22,
           moderateFunctionalRefundPct: 35,
