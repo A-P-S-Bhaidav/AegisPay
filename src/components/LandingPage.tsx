@@ -14,14 +14,16 @@ import { AegisBrandMark } from '../api';
 
 interface LandingPageProps {
   onOpenAuth: (mode?: 'login' | 'register') => void;
-  onLaunchDemo: () => Promise<void>;
+  onLaunchDemo?: () => Promise<void>;
   demoLoading: boolean;
+  error?: string;
 }
 
 export const LandingPage: React.FC<LandingPageProps> = ({
   onOpenAuth,
   onLaunchDemo,
   demoLoading,
+  error,
 }) => {
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
 
@@ -34,6 +36,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
   return (
     <div className="min-h-screen w-full bg-midnight-grid text-slate-100 flex flex-col">
+      <a href="#landing-main" className="skip-link">Skip to content</a>
       {/* Top Symmetrical Navigation Bar */}
       <header className="w-full border-b border-[#192030] bg-[#050507]/90 backdrop-blur-md sticky top-0 z-30">
         <div className="w-full px-4 sm:px-8 lg:px-12 h-16 flex items-center justify-between gap-4">
@@ -49,7 +52,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             </div>
           </div>
 
-          <nav className="hidden md:flex items-center gap-8 text-sm text-slate-300">
+          <nav aria-label="Main navigation" className="hidden md:flex items-center gap-8 text-sm text-slate-300">
             <a href="#how-it-works" className="hover:text-[#CCFF00] transition-colors">
               How It Works
             </a>
@@ -81,8 +84,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         </div>
       </header>
 
+      {error && <div role="alert" className="mx-4 mt-4 border border-red-500/60 bg-red-950/40 p-4 text-sm text-red-200">{error}</div>}
       {/* Main Full-Width Brutalist + Minimalist + Spatial Hero */}
-      <main className="flex-1 w-full px-4 sm:px-8 lg:px-12 py-10 lg:py-16 space-y-16">
+      <main id="landing-main" tabIndex={-1} className="flex-1 w-full px-4 sm:px-8 lg:px-12 py-10 lg:py-16 space-y-16">
         <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
           {/* Left 7 Columns: Clean Value Proposition */}
           <div className="lg:col-span-7 space-y-6">
@@ -101,21 +105,20 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
             <p className="text-base sm:text-lg text-slate-300 max-w-2xl leading-relaxed">
               One clear workspace for buyers, online stores, and agencies. Check suspicious
-              invoices before paying, win back failed customer payments automatically, settle
-              damaged-item partial refunds without return shipping, and split project milestones
-              down to the exact cent.
+              invoices before paying, review recovery options for failed payments, evaluate
+              partial refunds, and plan project milestones down to the exact cent.
             </p>
 
             <div className="flex flex-wrap items-center gap-3.5 pt-2">
-              <button
+              {onLaunchDemo && <button
                 type="button"
                 onClick={onLaunchDemo}
                 disabled={demoLoading}
                 className="btn-acid px-6 py-3.5 text-sm sm:text-base"
               >
                 <Play className="w-4 h-4 fill-current" />
-                {demoLoading ? 'Opening Guided Workspace...' : 'Try Interactive Guided Demo'}
-              </button>
+                {demoLoading ? 'Opening Practice Workspace...' : 'Try Practice Workspace'}
+              </button>}
 
               <button
                 type="button"
@@ -128,7 +131,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             </div>
 
             {/* Symmetrical 3-Pillar Trust Bar */}
-            <div className="grid grid-cols-3 gap-3 pt-4 border-t border-[#192030]">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-4 border-t border-[#192030]">
               <div className="p-3 bg-[#090B10] border border-[#192030]">
                 <div className="text-xs font-mono text-[#CCFF00] uppercase">Before You Pay</div>
                 <div className="text-sm font-semibold text-white mt-0.5">
@@ -167,11 +170,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 <div className="flex items-center gap-2">
                   <ShieldCheck className="w-5 h-5 text-[#CCFF00]" />
                   <span className="font-display font-bold text-sm uppercase tracking-wider text-white">
-                    Live Payment Protection Preview
+                    From review to payment
                   </span>
                 </div>
                 <span className="text-[11px] font-mono px-2 py-0.5 bg-[#CCFF00] text-[#050507] font-bold">
-                  READY
+                  SANDBOX
                 </span>
               </div>
 
@@ -180,11 +183,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   <div>
                     <div className="text-xs text-slate-400">1. Incoming Vendor Invoice</div>
                     <div className="text-sm font-semibold text-white">
-                      Design Studio Retainer — $450.00
+                      Review the amount and recipient
                     </div>
                   </div>
                   <span className="text-xs font-mono px-2 py-1 bg-[#CCFF00]/15 text-[#CCFF00] border border-[#CCFF00]/40">
-                    Verified Safe
+                    Review
                   </span>
                 </div>
 
@@ -192,11 +195,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   <div>
                     <div className="text-xs text-slate-400">2. Declined Customer Order</div>
                     <div className="text-sm font-semibold text-white">
-                      Card Expired — $189.00 Order
+                      Check retry restrictions
                     </div>
                   </div>
                   <span className="text-xs font-mono px-2 py-1 bg-[#0047FF]/25 text-white border border-[#0047FF]">
-                    Backup Link Sent
+                    Evaluate
                   </span>
                 </div>
 
@@ -204,11 +207,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   <div>
                     <div className="text-xs text-slate-400">3. Client Milestone Split</div>
                     <div className="text-sm font-semibold text-white">
-                      Phase 1 Delivered — $1,250.00
+                      Allocate the total in cents
                     </div>
                   </div>
                   <span className="text-xs font-mono px-2 py-1 bg-[#CCFF00]/15 text-[#CCFF00] border border-[#CCFF00]/40">
-                    PayPal Invoiced
+                    Plan
                   </span>
                 </div>
               </div>
@@ -217,10 +220,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 <span>Interactive 5-step tour included inside</span>
                 <button
                   type="button"
-                  onClick={onLaunchDemo}
+                  onClick={() => onOpenAuth('login')}
                   className="text-[#CCFF00] font-semibold hover:underline inline-flex items-center gap-1"
                 >
-                  Open Live Workspace
+                  Sign in to workspace
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
               </div>
@@ -358,21 +361,20 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               Ready to try AegisPay with step-by-step guidance?
             </h2>
             <p className="text-sm text-slate-300">
-              Sign in with Google or Email, or open the interactive demo workspace with a built-in
-              5-step walkthrough that shows you how every feature works.
+              Create an account to use the PayPal sandbox workspace with a guided walkthrough.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3 shrink-0">
-            <button
+            {onLaunchDemo && <button
               type="button"
               onClick={onLaunchDemo}
               disabled={demoLoading}
               className="btn-acid px-6 py-3 text-sm"
             >
               <CheckCircle2 className="w-4 h-4" />
-              {demoLoading ? 'Launching...' : 'Start Guided Demo'}
-            </button>
+              {demoLoading ? 'Launching...' : 'Open practice workspace'}
+            </button>}
             <button
               type="button"
               onClick={() => onOpenAuth('register')}
@@ -392,7 +394,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <span>— Safer Payments, Recovery &amp; Billing on PayPal</span>
         </div>
         <div className="font-mono text-[11px] text-slate-400">
-          Encrypted Sessions • Isolated Workspaces • PayPal Sandbox Connected
+          HttpOnly Sessions · Isolated Workspaces · PayPal Sandbox Integration
         </div>
       </footer>
     </div>

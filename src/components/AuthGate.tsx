@@ -18,7 +18,7 @@ interface AuthGateProps {
   authErrorBanner?: string;
   onAuthenticated: (meta?: { isNewAccount?: boolean }) => Promise<void>;
   onBackToLanding: () => void;
-  onLaunchDemo: () => Promise<void>;
+  onLaunchDemo?: () => Promise<void>;
 }
 
 export const AuthGate: React.FC<AuthGateProps> = ({
@@ -109,6 +109,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   };
 
   const handleQuickDemo = async () => {
+    if (!onLaunchDemo) return;
     setError('');
     setLoading(true);
     try {
@@ -121,7 +122,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   };
 
   return (
-    <div className="min-h-screen w-full bg-midnight-grid text-slate-100 flex flex-col justify-between px-4 sm:px-8 py-8">
+    <main className="min-h-screen w-full bg-midnight-grid text-slate-100 flex flex-col justify-between px-4 sm:px-8 py-8">
       <div className="w-full max-w-5xl mx-auto flex items-center justify-between">
         <button
           type="button"
@@ -150,12 +151,12 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               Sign in to manage your PayPal safety &amp; billing
             </h1>
             <p className="text-sm text-slate-300 leading-relaxed">
-              Use Google or Email interchangeably with the same address—your isolated workspace,
-              invoice checks, subscription limits, and milestone plans stay synced.
+              Sign in using the method you registered with. Your workspace holds your invoice
+              checks, spending limits, and milestone plans.
             </p>
           </div>
 
-          <div className="p-4 bg-[#070A12] border border-[#1E293B] space-y-3">
+          {onLaunchDemo && <div className="p-4 bg-[#070A12] border border-[#1E293B] space-y-3">
             <div className="text-xs font-mono uppercase text-[#CCFF00]">
               Want to explore right away?
             </div>
@@ -172,7 +173,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               <Play className="w-4 h-4 fill-current shrink-0" />
               Launch Guided Demo Workspace
             </button>
-          </div>
+          </div>}
         </div>
 
         {/* Right 7 Columns: Google OAuth + Email Sign In / Register */}
@@ -413,8 +414,8 @@ export const AuthGate: React.FC<AuthGateProps> = ({
       </div>
 
       <div className="text-center text-xs text-slate-500 font-mono">
-        Protected by encrypted HttpOnly session cookies &amp; per-account workspace isolation.
+        Protected by HttpOnly session cookies &amp; per-account workspace isolation.
       </div>
-    </div>
+    </main>
   );
 };

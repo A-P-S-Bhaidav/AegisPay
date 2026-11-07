@@ -28,6 +28,9 @@ export function App() {
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [authErrorBanner, setAuthErrorBanner] = useState('');
   const [demoLoading, setDemoLoading] = useState(false);
+  const [practiceEnabled, setPracticeEnabled] = useState(false);
+  const [appError, setAppError] = useState('');
+  const [tourFeedback, setTourFeedback] = useState('');
 
   const [state, setState] = useState<WorkspaceState | null>(null);
   const [section, setSection] = useState<WorkspaceSectionId>('overview');
@@ -75,6 +78,9 @@ export function App() {
 
   // Initial session check (strictly HttpOnly cookie — zero localStorage tokens)
   useEffect(() => {
+    void apiFetch<{ demoSandboxEnabled: boolean }>('/api/health')
+      .then((health) => setPracticeEnabled(health.demoSandboxEnabled))
+      .catch(() => {});
     const params = new URLSearchParams(window.location.search);
     const errParam = params.get('auth_error');
     const readyParam = params.get('auth_ready');
@@ -101,7 +107,6 @@ export function App() {
         ) {
           setTourStep(0);
           setTourOpen(true);
-          markTourSeen(ws.operator?.id, ws.operator?.email);
         }
       } catch {
         // Unauthenticated visitor stays on landing or auth screen
@@ -110,6 +115,19 @@ export function App() {
       }
     })();
   }, [hasSeenTourLocally, loadWorkspaceState, markTourSeen]);
+
+  useEffect(() => {
+    if (screen !== 'workspace') return;
+    const expireSession = () => {
+      setState(null);
+      setTourOpen(false);
+      setMcpHubOpen(false);
+      setAuthErrorBanner('Your session expired. Sign in again to continue.');
+      setScreen('auth');
+    };
+    window.addEventListener('aegispay:session-expired', expireSession);
+    return () => window.removeEventListener('aegispay:session-expired', expireSession);
+  }, [screen]);
 
   // Register progressive Chromium WebMCP tools when authenticated
   useEffect(() => {
@@ -140,12 +158,12 @@ export function App() {
     ) {
       setTourStep(0);
       setTourOpen(true);
-      markTourSeen(ws.operator?.id, ws.operator?.email);
     }
   };
 
   const handleLaunchDemo = async () => {
     setDemoLoading(true);
+    setAppError('');
     try {
       const demoAuth = await apiFetch<{ isNewAccount?: boolean }>('/api/auth/demo', {
         method: 'POST',
@@ -162,8 +180,10 @@ export function App() {
       ) {
         setTourStep(0);
         setTourOpen(true);
-        markTourSeen(ws.operator?.id, ws.operator?.email);
-      }
+        }
+    } catch (err) {
+      setAppError((err as Error).message || 'Could not open the demo. Please try again.');
+      throw err;
     } finally {
       setDemoLoading(false);
     }
@@ -195,6 +215,7 @@ export function App() {
 
   const handleRunTourSampleAction = async (stepId: string) => {
     setTourBusy(true);
+    setTourFeedback('');
     try {
       if (stepId === 'pay-safely') {
         await apiFetch('/api/scamshield/review', {
@@ -222,6 +243,9 @@ export function App() {
         });
       }
       await loadWorkspaceState();
+      setTourFeedback('Sample completed. The workspace has been updated.');
+    } catch (err) {
+      setTourFeedback((err as Error).message || 'The sample could not complete. Please try again.');
     } finally {
       setTourBusy(false);
     }
@@ -246,7 +270,8 @@ export function App() {
           setAuthErrorBanner('');
           setScreen('auth');
         }}
-        onLaunchDemo={handleLaunchDemo}
+        onLaunchDemo={practiceEnabled ? () => handleLaunchDemo().catch(() => {}) : undefined}
+        error={appError}
         demoLoading={demoLoading}
       />
     );
@@ -259,7 +284,7 @@ export function App() {
         authErrorBanner={authErrorBanner}
         onAuthenticated={handleAuthenticated}
         onBackToLanding={() => setScreen('landing')}
-        onLaunchDemo={handleLaunchDemo}
+        onLaunchDemo={practiceEnabled ? handleLaunchDemo : undefined}
       />
     );
   }
@@ -279,6 +304,7 @@ export function App() {
 
   return (
     <div className="min-h-screen w-full bg-dashboard-spatial text-slate-100 flex flex-col">
+      <a href="#workspace-main" className="skip-link">Skip to workspace content</a>
       {/* Sticky Full-Width Symmetrical Command Bar */}
       <header className="glass-command-bar sticky top-0 z-40 w-full">
         <div className="w-full px-4 sm:px-8 lg:px-12 py-3 flex flex-wrap items-center justify-between gap-3">
@@ -313,6 +339,7 @@ export function App() {
               const isTourTarget = !inVerificationLab && activeTourTarget === item.id;
               return (
                 <button
+                  aria-current={isActive ? 'page' : undefined}
                   key={item.id}
                   type="button"
                   onClick={() => {
@@ -342,6 +369,7 @@ export function App() {
                 setMcpHubOpen(true);
               }}
               className="btn-ghost-brutal px-3 py-1.5 text-xs border-[#CCFF00]/60 text-[#CCFF00]"
+              aria-label="Open MCP and extension hub"
               title="Open Live MCP Server & Chrome Extension Command Hub"
             >
               <Cpu className="w-3.5 h-3.5 text-[#CCFF00]" />
@@ -357,6 +385,7 @@ export function App() {
                 setTourOpen(true);
               }}
               className="btn-ghost-brutal px-3 py-1.5 text-xs"
+              aria-label="Launch guided tour"
               title="Launch step-by-step interactive walkthrough"
             >
               <Compass className="w-3.5 h-3.5 text-[#CCFF00]" />
@@ -371,6 +400,8 @@ export function App() {
                   ? 'bg-[#CCFF00] text-[#050507] border-[#CCFF00] font-bold'
                   : 'bg-[#090C14] text-slate-300 border-[#243049] hover:border-[#CCFF00] hover:text-[#CCFF00]'
               }`}
+              aria-label={inVerificationLab ? 'Exit verification lab' : 'Open verification lab'}
+              aria-pressed={inVerificationLab}
               title="Open isolated engineering & verification lab"
             >
               <FlaskConical className="w-3.5 h-3.5" />
@@ -392,8 +423,14 @@ export function App() {
         </div>
       </header>
 
+      <div role="status" className="px-4 sm:px-8 lg:px-12 pt-3 text-xs text-slate-300">
+        {state.operator?.role === 'DEMO_OPERATOR' ? 'Guest demo with seeded examples. ' : 'Private account workspace. '}
+        {state.system.paypal.hasLiveSandboxCredentials ? 'PayPal sandbox API configured; test funds only.' : 'PayPal simulated mode; no funds move.'}
+        {' '}{state.system.gemini.hasLiveGeminiKey || state.system.gemini.hasLiveGroqKey ? 'AI provider configured.' : 'AI uses local fallback analysis.'}
+      </div>
+      {appError && <div role="alert" className="mx-4 mt-3 border border-red-500/60 bg-red-950/40 p-3 text-sm text-red-200">{appError}</div>}
       {/* Main Full-Width Responsive Content Stage */}
-      <main className="flex-1 w-full px-4 sm:px-8 lg:px-12 py-6 sm:py-8">
+      <main id="workspace-main" tabIndex={-1} className="flex-1 w-full px-4 sm:px-8 lg:px-12 py-6 sm:py-8">
         {inVerificationLab ? (
           <Suspense
             fallback={
@@ -471,6 +508,7 @@ export function App() {
         open={tourOpen && !inVerificationLab}
         stepIndex={tourStep}
         busyAction={tourBusy}
+        actionFeedback={tourFeedback}
         onChangeStep={handleChangeTourStep}
         onRunSampleAction={handleRunTourSampleAction}
         onFinishOrSkip={handleFinishOrSkipTour}

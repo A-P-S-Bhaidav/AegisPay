@@ -28,12 +28,14 @@ interface EditableCollaborator {
 }
 
 export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) => {
+  const isDemo = state.operator?.role === 'DEMO_OPERATOR';
+  const [actionError, setActionError] = useState('');
   // Milestone Invoicing (PayStream) state
   const [naturalProjectBrief, setNaturalProjectBrief] = useState('');
-  const [projectTitle, setProjectTitle] = useState('E-Commerce Storefront & PayPal Redesign');
-  const [clientEmail, setClientEmail] = useState('client-accounts@personal.example.com');
-  const [budgetUsd, setBudgetUsd] = useState('2450');
-  const [collaborators, setCollaborators] = useState<EditableCollaborator[]>([
+  const [projectTitle, setProjectTitle] = useState(isDemo ? 'E-Commerce Storefront & PayPal Redesign' : '');
+  const [clientEmail, setClientEmail] = useState(isDemo ? 'client-accounts@personal.example.com' : '');
+  const [budgetUsd, setBudgetUsd] = useState(isDemo ? '2450' : '');
+  const [collaborators, setCollaborators] = useState<EditableCollaborator[]>(isDemo ? [
     {
       collaboratorName: 'Lead Developer',
       paypalEmail: 'lead-dev-sbx@personal.example.com',
@@ -46,23 +48,23 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
       role: 'Design',
       sharePct: 30,
     },
-  ]);
+  ] : [{ collaboratorName: state.operator?.fullName || '', paypalEmail: state.operator?.email || '', role: 'Owner', sharePct: 100 }]);
   const [creatingPlan, setCreatingPlan] = useState(false);
   const [issuingMilestoneId, setIssuingMilestoneId] = useState('');
   const [proofLink, setProofLink] = useState(
-    'https://github.com/example/storefront/releases/tag/v1.0 — System architecture & UI approved'
+    isDemo ? 'https://github.com/example/storefront/releases/tag/v1.0 — System architecture & UI approved' : ''
   );
   const [proofFeedback, setProofFeedback] = useState('');
 
   // Vendor Deal Assistant (DealForge) state
   const [naturalVendorQuote, setNaturalVendorQuote] = useState('');
   const [showAdvancedDealMandate, setShowAdvancedDealMandate] = useState(false);
-  const [dealTitle, setDealTitle] = useState('Annual Cloud Security Review');
-  const [vendorName, setVendorName] = useState('Sentinel Security Partners');
-  const [targetUsd, setTargetUsd] = useState('620');
-  const [maxUsd, setMaxUsd] = useState('820');
-  const [vendorAskUsd, setVendorAskUsd] = useState('980');
-  const [vendorFloorUsd, setVendorFloorUsd] = useState('640');
+  const [dealTitle, setDealTitle] = useState(isDemo ? 'Annual Cloud Security Review' : '');
+  const [vendorName, setVendorName] = useState(isDemo ? 'Sentinel Security Partners' : '');
+  const [targetUsd, setTargetUsd] = useState(isDemo ? '620' : '');
+  const [maxUsd, setMaxUsd] = useState(isDemo ? '820' : '');
+  const [vendorAskUsd, setVendorAskUsd] = useState(isDemo ? '980' : '');
+  const [vendorFloorUsd, setVendorFloorUsd] = useState(isDemo ? '640' : '');
   const [maxDeliveryDays, setMaxDeliveryDays] = useState('7');
   const [minRevisions, setMinRevisions] = useState('2');
   const [maxDepositPct, setMaxDepositPct] = useState('40');
@@ -103,6 +105,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
 
   const handleCreateMilestonePlan = async (e?: React.FormEvent, overrideBrief?: string) => {
     e?.preventDefault();
+    setActionError('');
     setCreatingPlan(true);
     setProofFeedback('');
     try {
@@ -120,38 +123,34 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
       if (res.parsedNaturalInput) {
         setProjectTitle(res.parsedNaturalInput.projectTitle);
         setClientEmail(res.parsedNaturalInput.clientEmail);
-        setBudgetUsd((res.parsedNaturalInput.totalBudgetCents / 100).toFixed(0));
+        setBudgetUsd((res.parsedNaturalInput.totalBudgetCents / 100).toFixed(2));
         if (Array.isArray(res.parsedNaturalInput.collaborators)) {
           setCollaborators(res.parsedNaturalInput.collaborators);
         }
       }
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setCreatingPlan(false);
     }
   };
 
   const handleOneClickPasteSow = async () => {
+    setActionError('');
     try {
-      let clip = '';
-      if (navigator.clipboard && navigator.clipboard.readText) {
-        clip = (await navigator.clipboard.readText()).trim();
-      }
-      if (!clip) {
-        clip =
-          'Mobile Checkout & PayPal Vault Integration for billing@northwind-commerce.io, total budget $3,600 across 3 milestones with Lead Engineer (60%), Product Designer (25%), and QA Automation (15%).';
-      }
+      if (!navigator.clipboard?.readText) throw new Error('Clipboard access is unavailable. Paste your project brief into the form.');
+      const clip = (await navigator.clipboard.readText()).trim();
+      if (!clip) throw new Error('Your clipboard is empty. Copy a project brief or enter the project details.');
       setNaturalProjectBrief(clip);
       await handleCreateMilestonePlan(undefined, clip);
-    } catch {
-      const fallback =
-        'Mobile Checkout & PayPal Vault Integration for billing@northwind-commerce.io, total budget $3,600 across 3 milestones with Lead Engineer (60%), Product Designer (25%), and QA Automation (15%).';
-      setNaturalProjectBrief(fallback);
-      await handleCreateMilestonePlan(undefined, fallback);
+    } catch (err) {
+      setActionError((err as Error).message || 'Clipboard permission was denied. Paste your project brief manually.');
     }
   };
 
   const handleSendInvoice = async (planId: string, milestoneId: string) => {
+    setActionError('');
     setIssuingMilestoneId(milestoneId);
     try {
       await apiFetch('/api/paystream/issue-invoice', {
@@ -159,6 +158,8 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
         body: JSON.stringify({ planId, milestoneId }),
       });
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setIssuingMilestoneId('');
     }
@@ -184,6 +185,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
 
   const handleRunDealAssistant = async (e?: React.FormEvent, overrideQuote?: string) => {
     e?.preventDefault();
+    setActionError('');
     setNegotiating(true);
     try {
       const nlQuote = (overrideQuote ?? naturalVendorQuote).trim();
@@ -231,6 +233,8 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
         setVendorFloorUsd((res.parsedNaturalInput.vendorFloorCents / 100).toFixed(0));
       }
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setNegotiating(false);
     }
@@ -238,6 +242,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
 
   return (
     <div className="space-y-6 animate-view-enter">
+      {actionError && <div role="alert" className="border border-red-500/60 bg-red-950/40 p-4 text-sm text-red-200">{actionError}</div>}
       {/* Top Symmetrical 2-Column Milestone Planner & Live PayPal Invoices */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <div className="lg:col-span-5 glass-brutal-panel corner-ticks p-6 space-y-4">
@@ -270,9 +275,14 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                 onChange={async (e) => {
                   const f = e.target.files?.[0];
                   if (!f) return;
-                  const text = (await f.text()).slice(0, 6000);
-                  setNaturalProjectBrief(text);
-                  await handleCreateMilestonePlan(undefined, text);
+                  try {
+                    if (f.size > 1024 * 1024) throw new Error('Choose a project brief smaller than 1 MB.');
+                    const text = (await f.text()).slice(0, 6000);
+                    setNaturalProjectBrief(text);
+                    await handleCreateMilestonePlan(undefined, text);
+                  } catch (err) {
+                    setActionError((err as Error).message);
+                  }
                 }}
               />
               <button
@@ -292,7 +302,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
               Describe Any Project or Paste a Client SOW in Plain English:
             </label>
             <div className="flex gap-2">
-              <input
+              <input aria-label="Project brief"
                 type="text"
                 value={naturalProjectBrief}
                 onChange={(e) => setNaturalProjectBrief(e.target.value)}
@@ -319,7 +329,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
           <form onSubmit={(e) => void handleCreateMilestonePlan(e)} className="space-y-3.5">
             <div>
               <label className="block text-xs font-medium text-slate-300 mb-1">Project Title</label>
-              <input
+              <input aria-label="Project title"
                 type="text"
                 value={projectTitle}
                 onChange={(e) => setProjectTitle(e.target.value)}
@@ -333,7 +343,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
                   Client Billing Email
                 </label>
-                <input
+                <input aria-label="Client billing email"
                   type="email"
                   value={clientEmail}
                   onChange={(e) => setClientEmail(e.target.value)}
@@ -345,7 +355,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                 <label className="block text-xs font-medium text-slate-300 mb-1">
                   Total Project Budget (USD)
                 </label>
-                <input
+                <input aria-label="Project budget in USD"
                   type="number"
                   min="50"
                   step="0.01"
@@ -380,7 +390,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                     key={idx}
                     className="grid grid-cols-12 gap-1.5 items-center bg-[#050507] p-2 border border-[#1E293B]"
                   >
-                    <input
+                    <input aria-label="Collaborator name"
                       type="text"
                       value={c.collaboratorName}
                       onChange={(e) =>
@@ -389,7 +399,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                       placeholder="Name"
                       className="input-brutal col-span-4 text-[11px] py-1"
                     />
-                    <input
+                    <input aria-label="Collaborator PayPal email"
                       type="email"
                       value={c.paypalEmail}
                       onChange={(e) =>
@@ -398,7 +408,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                       placeholder="PayPal Email"
                       className="input-brutal col-span-4 text-[11px] py-1"
                     />
-                    <input
+                    <input aria-label="Collaborator share percentage"
                       type="number"
                       min="1"
                       max="100"
@@ -484,7 +494,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                   <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[#161E2E]">
                     <button
                       type="button"
-                      disabled={issuingMilestoneId === m.milestoneId}
+                      disabled={Boolean(issuingMilestoneId) || Boolean(m.paypalInvoiceId)}
                       onClick={() => handleSendInvoice(activePlan.planId, m.milestoneId)}
                       className="btn-cobalt px-3.5 py-1.5 text-xs"
                     >
@@ -492,7 +502,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                       {issuingMilestoneId === m.milestoneId
                         ? 'Sending...'
                         : m.paypalInvoiceId
-                          ? 'Resend PayPal Invoice'
+                          ? 'Invoice Issued'
                           : 'Send PayPal Invoice'}
                     </button>
 
@@ -525,7 +535,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                   Delivery link or completion summary (used when clicking Verify Delivery Link):
                 </label>
                 <div className="flex gap-2">
-                  <input
+                  <input aria-label="Delivery link or completion summary"
                     type="text"
                     value={proofLink}
                     onChange={(e) => setProofLink(e.target.value)}
@@ -534,9 +544,13 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                   <button
                     type="button"
                     onClick={async () => {
-                      if (navigator.clipboard?.readText) {
+                      try {
+                        if (!navigator.clipboard?.readText) throw new Error('Paste the delivery link manually.');
                         const clip = (await navigator.clipboard.readText()).trim();
                         if (clip) setProofLink(clip);
+                        else setProofFeedback('Your clipboard is empty. Paste or enter a delivery link.');
+                      } catch {
+                        setProofFeedback('Clipboard permission was denied. Paste the delivery link manually.');
                       }
                     }}
                     className="btn-ghost-brutal px-3 py-1.5 text-xs shrink-0"
@@ -586,7 +600,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
             Describe Any Vendor Quote or Paste a Proposal Email:
           </label>
           <div className="flex flex-col sm:flex-row gap-2">
-            <input
+            <input aria-label="Vendor quote"
               type="text"
               value={naturalVendorQuote}
               onChange={(e) => setNaturalVendorQuote(e.target.value)}
@@ -617,7 +631,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
         >
           <div className="lg:col-span-2">
             <label className="block text-xs text-slate-300 mb-1">Service or Scope</label>
-            <input
+            <input aria-label="Service or scope"
               type="text"
               value={dealTitle}
               onChange={(e) => {
@@ -629,7 +643,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
           </div>
           <div>
             <label className="block text-xs text-slate-300 mb-1">Your Target ($)</label>
-            <input
+            <input aria-label="Target price in USD"
               type="number"
               value={targetUsd}
               onChange={(e) => {
@@ -641,7 +655,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
           </div>
           <div>
             <label className="block text-xs text-slate-300 mb-1">Your Max Cap ($)</label>
-            <input
+            <input aria-label="Maximum price in USD"
               type="number"
               value={maxUsd}
               onChange={(e) => {
@@ -653,7 +667,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
           </div>
           <div>
             <label className="block text-xs text-slate-300 mb-1">Vendor Quote ($)</label>
-            <input
+            <input aria-label="Vendor asking price in USD"
               type="number"
               value={vendorAskUsd}
               onChange={(e) => {
@@ -672,7 +686,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
           <div className="p-4 bg-[#050507] border border-[#243049] grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs">
             <div>
               <label className="block text-slate-400 mb-1">Vendor Name</label>
-              <input
+              <input aria-label="Vendor name"
                 type="text"
                 value={vendorName}
                 onChange={(e) => setVendorName(e.target.value)}
@@ -681,7 +695,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
             </div>
             <div>
               <label className="block text-slate-400 mb-1">Vendor Floor ($)</label>
-              <input
+              <input aria-label="Vendor minimum price in USD"
                 type="number"
                 value={vendorFloorUsd}
                 onChange={(e) => setVendorFloorUsd(e.target.value)}
@@ -690,7 +704,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
             </div>
             <div>
               <label className="block text-slate-400 mb-1">Max Delivery Days</label>
-              <input
+              <input aria-label="Maximum delivery days"
                 type="number"
                 value={maxDeliveryDays}
                 onChange={(e) => setMaxDeliveryDays(e.target.value)}
@@ -699,7 +713,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
             </div>
             <div>
               <label className="block text-slate-400 mb-1">Min Revisions</label>
-              <input
+              <input aria-label="Minimum revisions"
                 type="number"
                 value={minRevisions}
                 onChange={(e) => setMinRevisions(e.target.value)}
@@ -708,7 +722,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
             </div>
             <div>
               <label className="block text-slate-400 mb-1">Max Upfront Deposit %</label>
-              <input
+              <input aria-label="Maximum upfront deposit percentage"
                 type="number"
                 value={maxDepositPct}
                 onChange={(e) => setMaxDepositPct(e.target.value)}
@@ -717,7 +731,7 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
             </div>
             <div>
               <label className="block text-slate-400 mb-1">Manual Counter-Offer ($)</label>
-              <input
+              <input aria-label="Manual counteroffer in USD"
                 type="number"
                 value={manualOverrideUsd}
                 onChange={(e) => setManualOverrideUsd(e.target.value)}

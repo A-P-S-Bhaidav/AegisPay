@@ -1,77 +1,75 @@
-# AegisPay v3.1 - Master Setup, Security, Storage & Vercel Deployment Guide
+# AegisPay setup and judge testing guide
 
-This guide covers **Localhost (`http://localhost:8787`)**, **Live Vercel (`https://aegispay-orpin.vercel.app`)**, **Verified Google OAuth 2.0 & Scrypt Authentication**, **Interactive Guided Tour**, **Product vs. Verification Lab Separation**, and **One-Command PayRevive Benchmarking**.
+## Environment
 
----
+Use Node.js 22.12+ in the 22 LTS line or Node.js 24 LTS. Run `npm ci`, copy `.env.example` to `.env`, and configure the following locally. Never commit credentials or paste them into a submission description.
 
-## 1. Localhost Verification & Startup (`http://localhost:8787`)
+| Variable | Purpose |
+| --- | --- |
+| `PAYPAL_ENV=sandbox` | Hackathon sandbox environment |
+| `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` | REST app belonging to a sandbox business account |
+| `PAYPAL_WEBHOOK_ID` | Registered webhook ID for provider signature verification |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Primary semantic/image analysis provider and available model |
+| `GROQ_API_KEY`, `GROQ_TEXT_MODEL`, `GROQ_VISION_MODEL` | Optional secondary provider and available models |
+| `AEGIS_KERNEL_SECRET` | Unique random 32-byte hex secret, stable across server restarts |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` | Optional verified Google sign-in |
+| `PORT=8787` | Local server port |
+| `ALLOW_DEMO_SANDBOX=true` | Opt in to an isolated practice workspace with fixture data |
+| `ALLOWED_ORIGINS` | Additional explicitly trusted browser origins, comma-separated |
 
-Your local `.env` file is strictly git-ignored (`.gitignore` excludes `.env`, `.env.*`, `data/`, and `*.store.json`) and never exposed to client bundles, URLs, or `localStorage`.
+Model access varies by account and provider. The application reports actual execution telemetry. A configured key alone does not prove that a model responded. Production requests fail if an actual configured provider cannot complete the operation.
 
-```bash
-npm install
-npm test
-npm run benchmark:payrevive
-npm run build
+Generate the signing secret with:
+
+```sh
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+## Start and verify
+
+```sh
+npm ci
+npm run check
 npm start
 ```
 
-Open **[http://localhost:8787](http://localhost:8787)**.
+Open [localhost:8787](http://localhost:8787). Create a new email account or use configured Google sign-in. Public, shared administrator credentials are not supported. Unauthenticated login/registration cannot attach a password to an existing Google-only account.
 
----
+For development, `npm run dev` starts the API at port 8787 and Vite at port 5173. `npm run verify:providers` verifies real sandbox OAuth, creates USD 1 orders awaiting approval and an unsent invoice draft, and invokes the configured AI providers. It exits unsuccessfully if only deterministic fallback is available.
 
-## 2. Product Workspace vs. Isolated Verification Lab
+## Judge walkthrough using real providers
 
-1. **Customer Workspace (`Overview`, `Pay Safely`, `Merchant Recovery`, `Get Paid`)**:
-   - Designed for everyday buyers, freelancers, and merchants in plain English using the **Midnight Black (`#050507`) + Electric Cobalt (`#0047FF`) + Acid Lime (`#CCFF00`)** design system.
-   - **5-Step Interactive Guided Tour**: Automatically opens on first sign-in (and can be replayed anytime via **Guided Tour** in the header) with live **Try Sample Action** buttons on every step.
-2. **Verification Lab (`Verification Lab` header button)**:
-   - Lazy-loaded via `React.lazy` (`src/components/DiagnosticsLab.tsx`) so engineering tools and `AG Grid` never weigh down the customer app.
-   - Contains the **500-Batch PayRevive Benchmark**, **Trained Newton GBDT Model Card & TreeSHAP Waterfall**, **1,000-Case Safety Fuzzer**, **5-Attack Tamper Lab**, **Gemini -> Groq HTTP 429 Failover Tester**, **AG Grid Audit Ledger**, and **`PRINCIPAL_ARCHITECT` Admin Gateway Settings**.
+1. Sign into a newly created account. Inspect provider status and the empty activity history.
+2. In **Pay Safely**, enter an invoice message, amount, and sandbox merchant recipient. Run the review and inspect actual provider/model telemetry.
+3. After an allowed result, use **PayPal sandbox checkout**. Log into a separate sandbox personal buyer account and approve. Confirm the server reports a capture ID and completed capture. An approval URL alone is incomplete.
+4. Edit the invoice amount or recipient. The prior review must no longer unlock checkout. Review again before creating a new order.
+5. Enter an urgent request containing an instruction to ignore the safety policy. Check that the result holds or blocks checkout.
+6. Create a project in **Get Paid** with a sandbox buyer recipient and a non-round total. Verify that milestone amounts sum exactly to the total. Issuing an invoice creates a payment request; it is not paid until PayPal confirms payment.
+7. Inspect the **Verification Lab** audit ledger and exports. Explain each tested restriction with a specific recorded action.
 
----
+Use only sandbox identities for invoice recipients and buyer approval. Never place sandbox passwords or API secrets in the public repository. If judges need hosted credentials, use the submission's appropriate private access mechanism or permit account creation.
 
-## 3. Security, Session Transport & Multi-Tenant Storage
+## Google sign-in
 
-1. **Authentication & RBAC (`server/index.ts`, `server/security.ts`)**:
-   - **Email Accounts**: Hashed via `crypto.scryptSync` (`N=16384, r=8, p=1`, 16B random salt) and verified via `crypto.timingSafeEqual`.
-   - **Google OAuth 2.0**: Verified server-side against Google token endpoints (`aud` + `email_verified`) with a signed `aegis_oauth_state` CSRF cookie.
-   - **Interactive Demo Sandbox**: `POST /api/auth/demo` provisions an isolated `DEMO_OPERATOR` workspace (`403 Forbidden` on admin `/api/credentials`).
-   - **Session Transport**: `HttpOnly; SameSite=Strict` cookies + `X-Requested-With: AegisPay-Client` CSRF protection (zero `localStorage` tokens).
-2. **Async Multi-Tenant Persistence (`server/store.ts`)**:
-   - **Local / VM Node**: Non-blocking async atomic write-ahead vault at `data/aegispay_store.json` (`0o600` permissions, git-ignored) with persisted 256-bit HMAC secret generation when `AEGIS_KERNEL_SECRET` is unset.
-   - **Serverless (Vercel)**: Stateless HMAC-SHA256 identity + per-tenant workspace isolation inside a bounded `2,000`-tenant LRU cache.
+Register exact redirect URIs, for example `http://localhost:8787/api/auth/google/callback` and `https://aegispay-orpin.vercel.app/api/auth/google/callback`, in Google Cloud. The callback verifies the configured client audience and positive verified-email claim. Email login must not auto-attach an arbitrary password to an existing account.
 
----
+## MCP and extension
 
-## 4. Vercel Environment Variables & Google OAuth Setup
+Run stdio MCP using:
 
-Configure in **[Vercel Dashboard](https://vercel.com/dashboard)** -> **`aegispay`** -> **Settings** -> **Environment Variables**:
+```sh
+AEGISPAY_API_URL=http://localhost:8787 npm run mcp
+```
 
-- `PAYPAL_CLIENT_ID`
-- `PAYPAL_CLIENT_SECRET`
-- `PAYPAL_WEBHOOK_ID` *(optional; enables live PayPal webhook signature verification)*
-- `PAYPAL_ENV` = `sandbox`
-- `GEMINI_API_KEY`
-- `GEMINI_MODEL` = `gemini-3-flash-preview`
-- `GROQ_API_KEY`
-- `GROQ_TEXT_MODEL` = `openai/gpt-oss-120b`
-- `GROQ_VISION_MODEL` = `qwen/qwen3.8-27b`
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET`
-- `AEGIS_KERNEL_SECRET` = `<random-32-byte-hex-secret>`
+Provide the MCP client's supported authentication variables through its private configuration. Never hardcode a shared operator password. The MCP tests check initialization, discovery, and authenticated execution using temporary test accounts. HTTP MCP execution requires an authenticated application session or bearer credential.
 
-In **[Google Cloud Console -> Credentials](https://console.cloud.google.com/apis/credentials)**:
-- **Authorized JavaScript origins**: `http://localhost:8787`, `https://aegispay-orpin.vercel.app`
-- **Authorized redirect URIs**: `http://localhost:8787/api/auth/google/callback`, `https://aegispay-orpin.vercel.app/api/auth/google/callback`
+The extension is rebuilt by `npm run build:extension`. It supports explicit email/password account sign-in, keeps its bearer token in session storage, and sends page text only to the selected endpoint. Passwords are not persisted. Chrome permission prompts and internal-page restrictions still apply. Automated worker contract tests do not replace testing the installed Chrome service worker and side panel.
 
----
+## Deployment limits
 
-## 5. Under-3-Minute Demo Flow (Target: 2:45)
-
-1. **`0:00 - 0:35` | Clean Product Landing, Sign-In & Interactive Guided Tour**:
-   - Open `https://aegispay-orpin.vercel.app`, launch the **Interactive Demo Tour** (or sign in with Google/Email), and run Step 1's live sample action inside the 5-step Guided Tour.
-2. **`0:35 - 1:30` | Customer Product (`Pay Safely`, `Merchant Recovery`, `Get Paid`)**:
-   - Verify a `$45` invoice in **Pay Safely** to unlock **PayPal Smart Buttons**, recover a `$240` expired-card renewal via a live **PayPal Backup Funding Link (`INV2-...`)** in **Merchant Recovery**, and send an exact-cent milestone invoice in **Get Paid**.
-3. **`1:30 - 2:45` | Isolated `Verification Lab` (Separate from Customer UI)**:
-   - Click **Verification Lab** in the header: run the **500-Batch PayRevive Simulation** (`+51.35%` net recovery lift, `0` compliance violations, `0.8301` held-out ROC-AUC), run the **1,000-Case Safety Fuzzer** (`0` violations), test **Gemini -> Groq 429 Failover**, and inspect the **AG Grid Audit Ledger**.
+- Local JSON workspace storage is plaintext with filesystem permissions. Restrict filesystem access and back up data.
+- Vercel `/tmp` and in-memory payment maps are temporary and process-local. Cold starts and multiple instances can lose or disagree about ownership, replay protection, and revocation. Production money requires durable shared transactional storage.
+- A Render blueprint is supplied. A deployment and persistent storage must actually be provisioned to claim Render usage. A free ephemeral filesystem is not durable payment storage.
+- Register the PayPal webhook URL and set `PAYPAL_WEBHOOK_ID`. Test real sandbox events, signature failures, and delivery replay. A locally signed simulator event does not prove PayPal webhook delivery.
+- There is no bank-data connection, PayPal-wide transaction import, licensed escrow, or automatic collaborator payout product. Describe manually entered balances, local limits, and planned allocations accurately.
+- Synthetic recovery training and benchmark fixtures are experimental test tools, not customer evidence. Do not present those figures as live outcomes.

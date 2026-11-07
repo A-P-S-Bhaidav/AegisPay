@@ -83,6 +83,7 @@ interface InteractiveTourProps {
   open: boolean;
   stepIndex: number;
   busyAction: boolean;
+  actionFeedback?: string;
   onChangeStep: (nextIndex: number) => void;
   onRunSampleAction: (stepId: string) => Promise<void>;
   onFinishOrSkip: () => void;
@@ -92,6 +93,7 @@ export const InteractiveTour: React.FC<InteractiveTourProps> = ({
   open,
   stepIndex,
   busyAction,
+  actionFeedback,
   onChangeStep,
   onRunSampleAction,
   onFinishOrSkip,
@@ -126,7 +128,7 @@ export const InteractiveTour: React.FC<InteractiveTourProps> = ({
 
   return (
     <div
-      className="fixed bottom-4 right-4 left-4 sm:left-auto sm:w-[430px] z-50 animate-view-enter"
+      className="fixed bottom-4 right-4 left-4 sm:left-auto sm:w-[430px] max-h-[calc(100dvh-2rem)] overflow-y-auto z-50 animate-view-enter"
       role="dialog"
       aria-modal="false"
       aria-labelledby="aegis-tour-heading"
@@ -187,11 +189,12 @@ export const InteractiveTour: React.FC<InteractiveTourProps> = ({
               className="btn-cobalt w-full py-2 text-xs"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              {busyAction ? 'Running Live Example...' : step.actionLabel}
+              {busyAction ? 'Running sample...' : step.actionLabel}
             </button>
           )}
         </div>
 
+        {actionFeedback && <p role="status" className="mt-3 text-xs text-slate-200">{actionFeedback}</p>}
         {/* Footer Controls */}
         <div className="flex items-center justify-between gap-2 pt-4 mt-4 border-t border-[#1E293B]">
           <button
@@ -206,6 +209,7 @@ export const InteractiveTour: React.FC<InteractiveTourProps> = ({
             {stepIndex > 0 && (
               <button
                 type="button"
+                disabled={busyAction}
                 onClick={() => onChangeStep(stepIndex - 1)}
                 className="btn-ghost-brutal px-3 py-1.5 text-xs"
               >
@@ -217,6 +221,7 @@ export const InteractiveTour: React.FC<InteractiveTourProps> = ({
             <button
               ref={primaryBtnRef}
               type="button"
+              disabled={busyAction}
               onClick={() => {
                 if (isLast) {
                   onFinishOrSkip();

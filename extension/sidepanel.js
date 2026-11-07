@@ -14,8 +14,77 @@ const verdictSummary = document.getElementById('verdictSummary');
 const tokenBox = document.getElementById('tokenBox');
 const createPayPalOrderBtn = document.getElementById('createPayPalOrderBtn');
 const paypalCheckoutLink = document.getElementById('paypalCheckoutLink');
+const capturePayPalOrderBtn = document.getElementById('capturePayPalOrderBtn');
 
 let lastSignedToken = null;
+let lastOrderId = null;
+
+function resetCheckout() {
+  lastSignedToken = null;
+  lastOrderId = null;
+  createPayPalOrderBtn.hidden = true;
+  paypalCheckoutLink.hidden = true;
+  capturePayPalOrderBtn.hidden = true;
+}
+
+for (const input of [payeeInput, amountInput, textInput]) {
+  input.addEventListener('input', resetCheckout);
+}
+let authenticated = false;
+const apiEndpoint = document.getElementById('apiEndpoint');
+const signInForm = document.getElementById('signInForm');
+const signInBtn = document.getElementById('signInBtn');
+const signOutBtn = document.getElementById('signOutBtn');
+const authStatus = document.getElementById('authStatus');
+const accountEmail = document.getElementById('accountEmail');
+const accountPassword = document.getElementById('accountPassword');
+
+function setAuthState(signedIn, email = '') {
+  authenticated = signedIn;
+  signInForm.hidden = signedIn;
+  signOutBtn.hidden = !signedIn;
+  authStatus.textContent = signedIn ? `Signed in as ${email}` : 'Sign in to scan and review payment content.';
+  for (const button of [scanPageBtn, pasteClipBtn, scanBtn, agentIngestBtn, createPayPalOrderBtn]) button.disabled = !signedIn;
+}
+
+async function loadAuthStatus() {
+  const result = await chrome.runtime.sendMessage({ type: 'AEGISPAY_AUTH_STATUS' });
+  setAuthState(Boolean(result?.authenticated), result?.email || '');
+}
+
+chrome.storage.local.get('apiBaseUrl').then(async ({ apiBaseUrl }) => {
+  if (apiEndpoint && apiBaseUrl) apiEndpoint.value = apiBaseUrl;
+  await loadAuthStatus();
+});
+apiEndpoint?.addEventListener('change', async () => {
+  await chrome.storage.local.set({ apiBaseUrl: apiEndpoint.value });
+  resetCheckout();
+  resultBox.hidden = true;
+  await loadAuthStatus();
+});
+signInForm?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  signInBtn.disabled = true;
+  authStatus.textContent = 'Signing in...';
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'AEGISPAY_SIGN_IN', payload: { email: accountEmail.value, password: accountPassword.value } });
+    if (!result?.ok) throw new Error(result?.error || 'Sign-in failed.');
+    setAuthState(true, result.email);
+  } catch (err) {
+    authStatus.textContent = String(err.message || err);
+  } finally {
+    accountPassword.value = '';
+    signInBtn.disabled = false;
+  }
+});
+signOutBtn?.addEventListener('click', async () => {
+  await chrome.runtime.sendMessage({ type: 'AEGISPAY_SIGN_OUT' });
+  resetCheckout();
+  resultBox.hidden = true;
+  setAuthState(false);
+});
+setAuthState(false);
+
 
 function extractFieldsFromRawText(raw) {
   const emailMatch = raw.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
@@ -106,15 +175,22 @@ injectScamBtn?.addEventListener('click', () => {
 
 scanBtn?.addEventListener('click', async () => {
   scanBtn.textContent = 'Scanning Invoice & Prompt Guard...';
-  createPayPalOrderBtn.hidden = true;
-  paypalCheckoutLink.hidden = true;
-  const claimedAmountCents = Math.round((parseFloat(amountInput.value) || 45) * 100);
+  resetCheckout();
+  if (!authenticated) { scanBtn.textContent = 'Scan & Unlock PayPal Checkout'; return; }
+  const amount = Number(amountInput.value);
+  if (!textInput.value.trim() || !payeeInput.value.trim() || !Number.isFinite(amount) || amount <= 0) {
+    scanBtn.textContent = 'Scan & Unlock PayPal Checkout';
+    resultBox.hidden = false;
+    verdictTitle.textContent = 'Payment details required';
+    verdictSummary.textContent = 'Enter invoice text, the verified recipient, and a positive amount before scanning.';
+    return;
+  }
+  const claimedAmountCents = Math.round(amount * 100);
   const payload = {
     rawText: textInput.value,
     claimedAmountCents,
     currency: 'USD',
     payeeIdentifier: payeeInput.value,
-    autoExtractCurrency: true,
   };
 
   const response = await chrome.runtime.sendMessage({
@@ -134,9 +210,6 @@ scanBtn?.addEventListener('click', async () => {
 
   const { data, endpointUsed } = response;
   lastSignedToken = data.signedToken || null;
-  if (data.extractedMetadata?.detectedPayee) {
-    payeeInput.value = data.extractedMetadata.detectedPayee;
-  }
   verdictTitle.textContent = `Verdict: ${data.finalVerdict} (Risk Score: ${data.combinedRiskScore}/100)`;
   verdictTitle.style.color =
     data.finalVerdict === 'BLOCK' ? '#f87171' : data.finalVerdict === 'HOLD' ? '#fbbf24' : '#ccff00';
@@ -149,7 +222,7 @@ scanBtn?.addEventListener('click', async () => {
       ? `PayPal Checkout LOCKED - Single-use token denied.${pgScore} (${endpointUsed})`
       : `Token: ${data.signedToken?.payload?.tokenId}${pgScore} | HMAC: ${data.signedToken?.signature?.slice(0, 20)}...`;
 
-  if (data.finalVerdict !== 'BLOCK' && data.signedToken) {
+  if (data.paypalCheckoutUnlocked && data.signedToken) {
     createPayPalOrderBtn.hidden = false;
   }
 });
@@ -162,22 +235,53 @@ createPayPalOrderBtn?.addEventListener('click', async () => {
     payload: { signedToken: lastSignedToken },
   });
   createPayPalOrderBtn.textContent = 'Open Verified PayPal Checkout';
+  if (!response?.ok) {
+    resultBox.hidden = false;
+    verdictTitle.textContent = 'Checkout could not be created';
+    verdictSummary.textContent = response?.error || 'Try scanning the invoice again.';
+    return;
+  }
+  if (response.data?.order?.mode !== 'LIVE_PAYPAL_SANDBOX_API') {
+    verdictSummary.textContent = 'Simulated order created. No PayPal payment was made.';
+    return;
+  }
   if (response?.ok && response.data?.approvalUrl) {
     paypalCheckoutLink.href = response.data.approvalUrl;
     paypalCheckoutLink.textContent = `Open PayPal Checkout (${response.data.orderId})`;
     paypalCheckoutLink.hidden = false;
+    lastOrderId = response.data.orderId;
+    capturePayPalOrderBtn.hidden = false;
+  }
+});
+
+capturePayPalOrderBtn.addEventListener('click', async () => {
+  if (!lastOrderId || !lastSignedToken) return;
+  capturePayPalOrderBtn.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'AEGISPAY_CAPTURE_PAYPAL_ORDER',
+      payload: { orderId: lastOrderId, signedToken: lastSignedToken },
+    });
+    if (!response?.ok || !response.data?.captured || response.data.mode !== 'LIVE_PAYPAL_SANDBOX_API') {
+      throw new Error(response?.error || 'PayPal has not confirmed capture. Approve the order first.');
+    }
+    resetCheckout();
+    verdictSummary.textContent = `Sandbox capture confirmed: ${response.data.captureId}`;
+  } catch (err) {
+    verdictSummary.textContent = String(err.message || err);
+  } finally {
+    capturePayPalOrderBtn.disabled = false;
   }
 });
 
 agentIngestBtn?.addEventListener('click', async () => {
   agentIngestBtn.textContent = 'Running Autonomous Agent...';
-  createPayPalOrderBtn.hidden = true;
-  paypalCheckoutLink.hidden = true;
+  resetCheckout();
   const response = await chrome.runtime.sendMessage({
     type: 'AEGISPAY_AGENT_INGEST',
     payload: {
       rawText: textInput.value,
-      autoExecute: true,
+      autoExecute: false,
     },
   });
   agentIngestBtn.textContent = 'Run 1-Click Universal Agent Action';
@@ -189,7 +293,7 @@ agentIngestBtn?.addEventListener('click', async () => {
   }
   const { data, endpointUsed } = response;
   verdictTitle.style.color = '#ccff00';
-  verdictTitle.textContent = `Agent Executed: ${data.detectedWorkflow}`;
+  verdictTitle.textContent = `Agent Review: ${data.detectedWorkflow}`;
   verdictSummary.textContent = data.summary || 'Autonomous workflow executed.';
   tokenBox.textContent = `Section: ${data.targetSection} | Endpoint: ${endpointUsed}`;
 });

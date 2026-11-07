@@ -16,6 +16,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { apiFetch, fmtUsd, type WorkspaceState } from '../api';
+import { PayPalSmartCheckout } from '../PayPalSmartCheckout';
 
 interface PaySafelyViewProps {
   state: WorkspaceState;
@@ -59,13 +60,16 @@ const SAMPLE_STATEMENT_CSV = `Date,Merchant,MonthlyAmount,CapAmount,Notes
 2026-10-14,DevOps CI Runner Pro,$49.00,$60.00,Active weekly deployment pipeline`;
 
 export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }) => {
-  const [rawText, setRawText] = useState(SAMPLE_INVOICES[0].text);
-  const [payee, setPayee] = useState(SAMPLE_INVOICES[0].payee);
-  const [amountUsd, setAmountUsd] = useState(SAMPLE_INVOICES[0].amountUsd);
+  const isDemo = state.operator?.role === 'DEMO_OPERATOR';
+  const [rawText, setRawText] = useState(isDemo ? SAMPLE_INVOICES[0].text : '');
+  const [payee, setPayee] = useState(isDemo ? SAMPLE_INVOICES[0].payee : '');
+  const [amountUsd, setAmountUsd] = useState(isDemo ? SAMPLE_INVOICES[0].amountUsd : '');
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<any>(null);
   const [checkoutRes, setCheckoutRes] = useState<any>(null);
   const [invoiceAutoNote, setInvoiceAutoNote] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [invoiceImage, setInvoiceImage] = useState<{ base64: string; mimeType: string } | null>(null);
 
   // Real Subscription & Autopay Management state
   const [busySubId, setBusySubId] = useState('');
@@ -73,27 +77,27 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
   const [subAddOpen, setSubAddOpen] = useState(false);
   const [subImportText, setSubImportText] = useState('');
   const [newSubMerchant, setNewSubMerchant] = useState('');
-  const [newSubPriceUsd, setNewSubPriceUsd] = useState('29.00');
-  const [newSubCapUsd, setNewSubCapUsd] = useState('45.00');
-  const [newSubInactiveDays, setNewSubInactiveDays] = useState('110');
-  const [liveSubPlanName, setLiveSubPlanName] = useState('AegisPay Pro Cloud Seat');
-  const [liveSubPriceUsd, setLiveSubPriceUsd] = useState('29.00');
+  const [newSubPriceUsd, setNewSubPriceUsd] = useState(isDemo ? '29.00' : '');
+  const [newSubCapUsd, setNewSubCapUsd] = useState(isDemo ? '45.00' : '');
+  const [newSubInactiveDays, setNewSubInactiveDays] = useState(isDemo ? '110' : '');
+  const [liveSubPlanName, setLiveSubPlanName] = useState(isDemo ? 'AegisPay Pro Cloud Seat' : '');
+  const [liveSubPriceUsd, setLiveSubPriceUsd] = useState(isDemo ? '29.00' : '');
   const [creatingLiveSub, setCreatingLiveSub] = useState(false);
 
   // Realistic Natural-Language Cashflow & Affordability state
   const [naturalCashflowQuery, setNaturalCashflowQuery] = useState(
-    SAMPLE_AFFORDABILITY_QUERIES[0]
+    isDemo ? SAMPLE_AFFORDABILITY_QUERIES[0] : ''
   );
   const [askingNaturalCashflow, setAskingNaturalCashflow] = useState(false);
-  const [spendItem, setSpendItem] = useState('4K Studio Monitor');
-  const [spendUsd, setSpendUsd] = useState('420');
+  const [spendItem, setSpendItem] = useState(isDemo ? '4K Studio Monitor' : '');
+  const [spendUsd, setSpendUsd] = useState(isDemo ? '420' : '');
   const [budgetRes, setBudgetRes] = useState<any>(null);
   const [showProfileEditor, setShowProfileEditor] = useState(false);
   const [editBalanceUsd, setEditBalanceUsd] = useState(
-    String((state.lupa.currentCheckingBalanceCents / 100).toFixed(0))
+    (state.lupa.currentCheckingBalanceCents / 100).toFixed(2)
   );
   const [editBufferUsd, setEditBufferUsd] = useState(
-    String((state.lupa.minimumSafetyBufferCents / 100).toFixed(0))
+    (state.lupa.minimumSafetyBufferCents / 100).toFixed(2)
   );
   const [newBillName, setNewBillName] = useState('');
   const [newBillUsd, setNewBillUsd] = useState('');
@@ -102,10 +106,17 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
 
   // Spending rules & agent permits
   const [ruleSentence, setRuleSentence] = useState(
-    'Allow purchases up to $250 automatically and cap any single purchase at $600'
+    isDemo ? 'Allow purchases up to $250 automatically and cap any single purchase at $600' : ''
   );
   const [ruleStatus, setRuleStatus] = useState('');
   const [agentSimNote, setAgentSimNote] = useState('');
+
+  const reviewGenerationRef = useRef(0);
+  const invalidateReview = () => {
+    reviewGenerationRef.current += 1;
+    setScanResult(null);
+    setCheckoutRes(null);
+  };
 
   const invoiceFileRef = useRef<HTMLInputElement | null>(null);
   const statementFileRef = useRef<HTMLInputElement | null>(null);
@@ -115,10 +126,10 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
     const amountMatch =
       text.match(/\$\s*([0-9]{1,6}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)/) ||
       text.match(/(?:USD|EUR|GBP)\s*([0-9]{1,6}(?:\.[0-9]{1,2})?)/i);
-    const extractedPayee = emailMatch ? emailMatch[0] : payee || 'merchant@invoice-check.io';
+    const extractedPayee = emailMatch ? emailMatch[0] : '';
     const extractedAmountUsd = amountMatch
       ? amountMatch[1].replace(/,/g, '')
-      : amountUsd || '75.00';
+      : '';
     return { extractedPayee, extractedAmountUsd };
   };
 
@@ -127,10 +138,16 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
     payeeToUse: string,
     amountUsdToUse: string
   ) => {
+    const generation = ++reviewGenerationRef.current;
     setScanning(true);
+    setActionError('');
+    setScanResult(null);
     setCheckoutRes(null);
     try {
-      const cents = Math.max(100, Math.round(Number(amountUsdToUse || '45') * 100));
+      const cents = Math.round(Number(amountUsdToUse) * 100);
+      if (!Number.isSafeInteger(cents) || cents <= 0 || !payeeToUse.trim() || (!textToScan.trim() && !invoiceImage)) {
+        throw new Error('Enter an invoice message or image, the recipient, and a positive amount.');
+      }
       const res = await apiFetch('/api/scamshield/review', {
         method: 'POST',
         body: JSON.stringify({
@@ -138,17 +155,23 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
           claimedAmountCents: cents,
           currency: 'USD',
           payeeIdentifier: payeeToUse,
-          autoExtractCurrency: true,
+          imageBase64: invoiceImage?.base64,
+          imageMimeType: invoiceImage?.mimeType,
         }),
       });
+      if (generation !== reviewGenerationRef.current) return;
       setScanResult(res);
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setScanning(false);
     }
   };
 
   const applySample = (s: (typeof SAMPLE_INVOICES)[number]) => {
+    invalidateReview();
+    setInvoiceImage(null);
     setRawText(s.text);
     setPayee(s.payee);
     setAmountUsd(s.amountUsd);
@@ -164,56 +187,53 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
 
   const handleOneClickClipboardInvoiceScan = async () => {
     setInvoiceAutoNote('');
+    setActionError('');
     try {
-      let clip = '';
-      if (navigator.clipboard && navigator.clipboard.readText) {
-        clip = (await navigator.clipboard.readText()).trim();
-      }
-      if (!clip) {
-        clip =
-          'URGENT INVOICE #8831 from PayPal Resolution Support (security@paypa1-verify-desk.com): Send $540.00 immediately via Friends & Family to unlock your account.';
-      }
+      if (!navigator.clipboard?.readText) throw new Error('Clipboard access is unavailable. Paste the invoice text into the form.');
+      const clip = (await navigator.clipboard.readText()).trim();
+      if (!clip) throw new Error('Your clipboard is empty. Copy an invoice or select a sample invoice.');
       const { extractedPayee, extractedAmountUsd } = extractPayeeAndAmountFromText(clip);
+      setInvoiceImage(null);
       setRawText(clip);
       setPayee(extractedPayee);
       setAmountUsd(extractedAmountUsd);
-      setInvoiceAutoNote(
-        `Auto-extracted ${extractedPayee} ($${extractedAmountUsd}) from clipboard and scanned in 1 click.`
-      );
-      await runSafetyCheckDirect(clip, extractedPayee, extractedAmountUsd);
-    } catch {
-      const fallback = SAMPLE_INVOICES[1];
-      setRawText(fallback.text);
-      setPayee(fallback.payee);
-      setAmountUsd(fallback.amountUsd);
-      await runSafetyCheckDirect(fallback.text, fallback.payee, fallback.amountUsd);
+      setScanResult(null);
+      setCheckoutRes(null);
+      setInvoiceAutoNote('Invoice pasted. Verify the recipient and amount, then check payment safety.');
+    } catch (err) {
+      setActionError((err as Error).message || 'Clipboard permission was denied. Paste the invoice text manually.');
     }
   };
 
   const handleInvoiceFileUpload = async (file: File) => {
-    const text = file.type.startsWith('image/')
-      ? `Uploaded invoice screenshot (${file.name}) for $165.00 from billing@studio-partner.io`
-      : (await file.text()).slice(0, 8000);
-    const { extractedPayee, extractedAmountUsd } = extractPayeeAndAmountFromText(text);
-    setRawText(text);
-    setPayee(extractedPayee);
-    setAmountUsd(extractedAmountUsd);
-    setInvoiceAutoNote(`Loaded ${file.name} and ran safety check automatically.`);
-    await runSafetyCheckDirect(text, extractedPayee, extractedAmountUsd);
-  };
-
-  const handlePayWithPayPal = async () => {
-    if (!scanResult?.signedToken) return;
-    setScanning(true);
+    setActionError('');
+    setScanResult(null);
+    setCheckoutRes(null);
     try {
-      const res = await apiFetch('/api/scamshield/create-paypal-order', {
-        method: 'POST',
-        body: JSON.stringify({ signedToken: scanResult.signedToken }),
-      });
-      setCheckoutRes(res);
-      await onRefresh();
-    } finally {
-      setScanning(false);
+      if (file.size > 2.8 * 1024 * 1024) throw new Error('Choose an invoice smaller than 2.8 MB.');
+      if (file.type.startsWith('image/')) {
+        if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('Use a PNG, JPEG, or WebP image.');
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => reject(new Error('The invoice image could not be read.'));
+          reader.readAsDataURL(file);
+        });
+        setInvoiceImage({ base64: dataUrl.slice(dataUrl.indexOf(',') + 1), mimeType: file.type });
+        setRawText('');
+        setInvoiceAutoNote(`Image attached: ${file.name}. Enter the amount, recipient, and any invoice text you can verify before checking safety.`);
+        return;
+      }
+      if (!/\.(txt|eml|csv)$/i.test(file.name)) throw new Error('Upload a text, email, CSV, PNG, JPEG, or WebP invoice. Copy text from PDF files into the form.');
+      const text = (await file.text()).slice(0, 8000);
+      const { extractedPayee, extractedAmountUsd } = extractPayeeAndAmountFromText(text);
+      setInvoiceImage(null);
+      setRawText(text);
+      setPayee(extractedPayee);
+      setAmountUsd(extractedAmountUsd);
+      setInvoiceAutoNote(`Loaded ${file.name}. Verify the amount and recipient, then check payment safety.`);
+    } catch (err) {
+      setActionError((err as Error).message);
     }
   };
 
@@ -232,9 +252,11 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
       setSubActionBanner(
         action === 'REVOKE'
           ? `Canceled recurring agreement ${agreementId}.`
-          : `Tightened monthly pull cap on ${agreementId}.`
+          : `Updated the AegisPay local policy cap for ${agreementId}. PayPal wallet debit permissions are unchanged.`
       );
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setBusySubId('');
     }
@@ -257,6 +279,8 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
         `Auto-Cleaned ${res.revokedCount} unused subscription(s) & tightened ${res.tightenedCount} billing cap(s) — saving ${fmtUsd(res.monthlySavedCents)}/mo (${fmtUsd(res.annualSavedCents)}/yr).`
       );
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setBusySubId('');
     }
@@ -277,6 +301,8 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
         `Synced ${res.synced.discovered.length} recurring agreement(s) from PayPal Sandbox (${res.newlyMergedCount} newly added).`
       );
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setBusySubId('');
     }
@@ -301,6 +327,8 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
         `Created live PayPal Sandbox Subscription ${res.subscription.subscriptionId} (${res.subscription.planName}).`
       );
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setCreatingLiveSub(false);
     }
@@ -321,6 +349,8 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
       );
       setSubImportText('');
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setBusySubId('');
     }
@@ -349,6 +379,8 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
       setSubActionBanner(`Added ${res.addedPermissions[0]?.merchantName} to your subscriptions.`);
       setNewSubMerchant('');
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setBusySubId('');
     }
@@ -373,6 +405,8 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
         setSpendUsd((res.parsed.proposedSpendCents / 100).toFixed(2));
       }
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setAskingNaturalCashflow(false);
     }
@@ -392,33 +426,30 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
       });
       setBudgetRes(res);
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setAskingNaturalCashflow(false);
     }
   };
 
-  const handleSaveCashflowProfile = async (
-    updatedCommitments = state.lupa.cashflowCommitments
-  ) => {
+  const handleSaveCashflowProfile = async (change: Record<string, unknown> = {}) => {
     setSavingProfile(true);
     try {
       const balCents = Math.max(0, Math.round(Number(editBalanceUsd || '0') * 100));
       const bufCents = Math.max(0, Math.round(Number(editBufferUsd || '0') * 100));
-      const res = await apiFetch('/api/lupa/cashflow-update', {
+      await apiFetch('/api/lupa/cashflow-update', {
         method: 'POST',
         body: JSON.stringify({
-          currentCheckingBalanceCents: balCents,
-          minimumSafetyBufferCents: bufCents,
-          commitments: updatedCommitments,
+          balanceCents: balCents,
+          safetyBufferCents: bufCents,
+          ...change,
         }),
       });
-      setBudgetRes({
-        result: res.defaultAffordability,
-        currentCheckingBalanceCents: res.currentCheckingBalanceCents,
-        minimumSafetyBufferCents: res.minimumSafetyBufferCents,
-        commitments: res.commitments,
-      });
+      setBudgetRes(null);
       await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message || 'The request failed. Please try again.');
     } finally {
       setSavingProfile(false);
     }
@@ -427,25 +458,21 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
   const handleAddCommitmentBill = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newBillName.trim() || !newBillUsd) return;
-    const nextCommitments = [
-      ...state.lupa.cashflowCommitments,
-      {
-        id: `cf_${Date.now().toString(36)}`,
+    await handleSaveCashflowProfile({
+      addCommitment: {
         name: newBillName.trim(),
         amountCents: Math.max(100, Math.round(Number(newBillUsd) * 100)),
         dueInDays: Math.max(1, Math.min(30, Math.round(Number(newBillDays || '7')))),
         category: 'ESSENTIAL_LIVING' as const,
         mandatory: true,
       },
-    ];
+    });
     setNewBillName('');
     setNewBillUsd('');
-    await handleSaveCashflowProfile(nextCommitments);
   };
 
   const handleRemoveCommitmentBill = async (id: string) => {
-    const nextCommitments = state.lupa.cashflowCommitments.filter((c) => c.id !== id);
-    await handleSaveCashflowProfile(nextCommitments);
+    await handleSaveCashflowProfile({ removeCommitmentId: id });
   };
 
   const handleSaveRule = async (e: React.FormEvent) => {
@@ -471,6 +498,8 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
   };
 
   const handleResolveHold = async (orderId: string, action: 'CAPTURE' | 'VOID') => {
+    setActionError('');
+    try {
     await apiFetch('/api/lupa/resolve-hold', {
       method: 'POST',
       body: JSON.stringify({ orderId, action }),
@@ -481,6 +510,9 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
         : `Declined & voided held PayPal authorization ${orderId}.`
     );
     await onRefresh();
+    } catch (err) {
+      setActionError((err as Error).message);
+    }
   };
 
   const handleSimulateAgentPurchase = async (mode: 'AUTO' | 'HOLD') => {
@@ -537,12 +569,13 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
     }
   };
 
-  const heldOrders = state.orders.filter((o) => o.status === 'AUTHORIZED');
-  const activeAffordability = budgetRes?.result || state.lupa.defaultAffordability;
+  const heldOrders = state.orders.filter((o) => o.pillar === 'LUPAPERMIT' && o.intent === 'AUTHORIZE' && ['CREATED', 'AUTHORIZED'].includes(o.status));
+  const activeAffordability = budgetRes?.result || (isDemo ? state.lupa.defaultAffordability : null);
   const flaggedSubsCount = state.lupa.zombieReport.audits.filter((a) => a.isZombie).length;
 
   return (
     <div className="space-y-6 animate-view-enter">
+      {actionError && <div role="alert" className="border border-red-500/60 bg-red-950/40 p-4 text-sm text-red-200">{actionError}</div>}
       {/* Top Symmetrical 2-Column Layout: Left = Invoice Checker, Right = Result & PayPal Checkout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
         <div className="lg:col-span-7 glass-brutal-panel corner-ticks p-6 space-y-4">
@@ -570,7 +603,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
               <input
                 ref={invoiceFileRef}
                 type="file"
-                accept=".eml,.txt,.pdf,.csv,image/*"
+                accept=".eml,.txt,.csv,image/png,image/jpeg,image/webp"
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -621,10 +654,10 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                 <label className="block text-xs font-medium text-slate-300 mb-1">
                   Recipient Email or Merchant
                 </label>
-                <input
+                <input aria-label="Recipient email or merchant"
                   type="text"
                   value={payee}
-                  onChange={(e) => setPayee(e.target.value)}
+                  onChange={(e) => { setPayee(e.target.value); invalidateReview(); }}
                   className="input-brutal"
                   required
                 />
@@ -633,12 +666,12 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                 <label className="block text-xs font-medium text-slate-300 mb-1">
                   Requested Amount (USD)
                 </label>
-                <input
+                <input aria-label="Requested amount in USD"
                   type="number"
                   step="0.01"
-                  min="1"
+                  min="0.01"
                   value={amountUsd}
-                  onChange={(e) => setAmountUsd(e.target.value)}
+                  onChange={(e) => { setAmountUsd(e.target.value); invalidateReview(); }}
                   className="input-brutal"
                   required
                 />
@@ -649,13 +682,13 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
               <label className="block text-xs font-medium text-slate-300 mb-1">
                 Paste Invoice Message, Payment Note, or Link
               </label>
-              <textarea
+              <textarea aria-label="Invoice message, payment note, or link"
                 rows={4}
                 value={rawText}
-                onChange={(e) => setRawText(e.target.value)}
+                onChange={(e) => { setRawText(e.target.value); invalidateReview(); }}
                 className="input-brutal"
                 placeholder="Paste the message or invoice details sent to you..."
-                required
+                required={!invoiceImage}
               />
             </div>
 
@@ -749,36 +782,25 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                   </div>
                 )}
 
+                {scanResult.reviewNotes?.map((note: string) => (
+                  <p key={note} className="text-sm text-amber-200">{note}</p>
+                ))}
+
                 {scanResult.paypalCheckoutUnlocked && (
                   <div className="space-y-3 pt-2">
-                    <button
-                      type="button"
-                      onClick={handlePayWithPayPal}
-                      disabled={scanning}
-                      className="btn-cobalt w-full py-3 text-sm"
-                    >
-                      Proceed to PayPal Checkout ({fmtUsd(scanResult.signedToken.payload.amountCents)})
-                    </button>
-
-                    {checkoutRes?.approvalUrl && (
-                      <div className="p-3.5 bg-[#091124] border border-[#0047FF] flex items-center justify-between gap-3">
-                        <div className="text-xs">
-                          <div className="font-semibold text-white">PayPal Order Ready</div>
-                          <div className="font-mono text-[11px] text-slate-400">
-                            Order ID: {checkoutRes.orderId}
-                          </div>
-                        </div>
-                        <a
-                          href={checkoutRes.approvalUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="btn-acid px-3.5 py-2 text-xs shrink-0"
-                        >
-                          Open PayPal
-                          <ExternalLink className="w-3.5 h-3.5" />
-                        </a>
-                      </div>
-                    )}
+                    <PayPalSmartCheckout
+                      publicClientId={state.system.paypal.publicClientId}
+                      signedToken={scanResult.signedToken}
+                      amountCents={scanResult.signedToken.payload.amountCents}
+                      currency={scanResult.signedToken.payload.currency}
+                      payeeIdentifier={scanResult.signedToken.payload.payeeIdentifier}
+                      liveSandbox={state.system.paypal.hasLiveSandboxCredentials}
+                      onCaptured={(result) => {
+                        setCheckoutRes(result);
+                        void onRefresh().catch((err) => setActionError((err as Error).message));
+                      }}
+                    />
+                    {checkoutRes?.captured && <p role="status" className="text-sm text-[#CCFF00]">Payment captured. Reference: {checkoutRes.captureId}</p>}
                   </div>
                 )}
               </div>
@@ -798,17 +820,18 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1E293B] pb-3">
             <div>
               <div className="text-xs font-mono uppercase text-[#CCFF00]">
-                Subscription &amp; Autopay Cleanup (Live PayPal + Device Import)
+                Merchant Subscriptions &amp; Imported Billing Records
               </div>
               <h3 className="font-display text-lg font-bold text-white">
-                Recurring PayPal Billing Permissions
+                Recurring Billing Workspace
               </h3>
             </div>
             <span className="text-xs font-mono text-[#CCFF00]">
-              Save {fmtUsd(state.kpis.recoverableMonthlyCents)}/mo
+              Potential {fmtUsd(state.kpis.recoverableMonthlyCents)}/mo
             </span>
           </div>
 
+          <p className="text-xs text-slate-400">PayPal actions manage customer subscriptions created by this merchant workspace. Imported bank or wallet records are local tracking data. AegisPay caps are local policy limits, not limits enforced on PayPal wallet debits.</p>
           {/* 1-Click Agentic Subscription Actions */}
           <div className="flex flex-wrap items-center gap-2">
             {flaggedSubsCount > 0 && (
@@ -869,14 +892,14 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                   A. Create a Live PayPal Sandbox Subscription (/v1/billing/subscriptions)
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
-                  <input
+                  <input aria-label="Subscription plan name"
                     type="text"
                     value={liveSubPlanName}
                     onChange={(e) => setLiveSubPlanName(e.target.value)}
                     placeholder="Subscription Plan Name"
                     className="input-brutal sm:col-span-6 text-xs"
                   />
-                  <input
+                  <input aria-label="Monthly subscription price in USD"
                     type="number"
                     step="0.01"
                     min="5"
@@ -935,7 +958,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                   </div>
                 </div>
                 <div className="flex gap-2">
-                  <textarea
+                  <textarea aria-label="Recurring charges to import"
                     rows={2}
                     value={subImportText}
                     onChange={(e) => setSubImportText(e.target.value)}
@@ -959,14 +982,14 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                   C. Add Custom Subscription Manually
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-12 gap-2">
-                  <input
+                  <input aria-label="Subscription merchant"
                     type="text"
                     value={newSubMerchant}
                     onChange={(e) => setNewSubMerchant(e.target.value)}
                     placeholder="Merchant (e.g. Notion Plus)"
                     className="input-brutal col-span-2 sm:col-span-5 text-xs"
                   />
-                  <input
+                  <input aria-label="Average monthly charge in USD"
                     type="number"
                     step="0.01"
                     value={newSubPriceUsd}
@@ -974,7 +997,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                     placeholder="Avg $/mo"
                     className="input-brutal sm:col-span-2 text-xs"
                   />
-                  <input
+                  <input aria-label="Monthly cap in USD"
                     type="number"
                     step="0.01"
                     value={newSubCapUsd}
@@ -982,7 +1005,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                     placeholder="Cap $/mo"
                     className="input-brutal sm:col-span-2 text-xs"
                   />
-                  <input
+                  <input aria-label="Days since last use"
                     type="number"
                     value={newSubInactiveDays}
                     onChange={(e) => setNewSubInactiveDays(e.target.value)}
@@ -1004,6 +1027,9 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
           {/* List of Active & Audited Subscriptions */}
           <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
             {state.lupa.billingPermissions.map((perm) => {
+              const providerCreated = perm.source === 'PAYPAL_SANDBOX_SYNC';
+              const paypalSubscription = state.lupa.subscriptions.find((subscription) => subscription.subscriptionId === perm.agreementId);
+              const displayStatus = paypalSubscription?.status || perm.status;
               const audit = state.lupa.zombieReport.audits.find(
                 (a) => a.agreementId === perm.agreementId
               );
@@ -1024,11 +1050,13 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                               : 'border-emerald-500/40 text-emerald-300'
                         }`}
                       >
-                        {perm.status === 'REVOKED'
+                        {displayStatus === 'REVOKED' || displayStatus === 'CANCELLED'
                           ? 'CANCELED'
-                          : audit?.isZombie
-                            ? 'UNUSED / HIGH LIMIT'
-                            : 'ACTIVE'}
+                          : displayStatus !== 'ACTIVE'
+                            ? displayStatus.replace(/_/g, ' ')
+                            : audit?.isZombie && !providerCreated
+                              ? 'UNUSED / HIGH LIMIT'
+                              : 'ACTIVE'}
                       </span>
                       {perm.source && (
                         <span className="text-[10px] font-mono px-1.5 py-0.5 bg-[#0047FF]/20 border border-[#0047FF]/50 text-sky-300">
@@ -1037,8 +1065,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                       )}
                     </div>
                     <div className="text-xs text-slate-400 font-mono">
-                      {perm.agreementId} • Avg {fmtUsd(perm.averageChargeCents)}/mo • Limit{' '}
-                      {fmtUsd(perm.monthlyCapCents)}/mo • Idle {perm.lastUserInteractionDaysAgo}d
+                      {perm.agreementId} · {providerCreated ? 'Plan price' : 'Recorded average'} {fmtUsd(perm.averageChargeCents)}/mo · AegisPay local cap {fmtUsd(perm.monthlyCapCents)}/mo · {providerCreated ? 'Usage and last charge unknown' : `Recorded idle time ${perm.lastUserInteractionDaysAgo}d`}
                     </div>
                     {audit?.reasons?.[0] && perm.status === 'ACTIVE' && (
                       <div className="text-[11px] text-amber-200/90">{audit.reasons[0]}</div>
@@ -1050,7 +1077,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                         rel="noreferrer"
                         className="inline-flex items-center gap-1 text-[11px] font-mono text-[#CCFF00] underline"
                       >
-                        <span>View Live PayPal Subscription</span>
+                        <span>View PayPal sandbox subscription</span>
                         <ExternalLink className="w-3 h-3" />
                       </a>
                     )}
@@ -1064,7 +1091,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                         onClick={() => handleSubscriptionAction(perm.agreementId, 'TIGHTEN_CAP')}
                         className="btn-ghost-brutal px-2.5 py-1.5 text-xs"
                       >
-                        Lower Limit
+                        Lower Local Cap
                       </button>
                       <button
                         type="button"
@@ -1072,7 +1099,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                         onClick={() => handleSubscriptionAction(perm.agreementId, 'REVOKE')}
                         className="btn-acid px-3 py-1.5 text-xs"
                       >
-                        Cancel Autopay
+                        {providerCreated ? 'Cancel Subscription' : 'Remove Local Record'}
                       </button>
                     </div>
                   )}
@@ -1089,7 +1116,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
               <Wallet className="w-4 h-4 text-[#CCFF00]" />
               <div>
                 <div className="text-[10px] font-mono uppercase text-[#CCFF00]">
-                  Natural-Language Cashflow &amp; Pay-in-4 Simulator
+                  Cashflow &amp; Illustrative Installments
                 </div>
                 <h3 className="font-display text-lg font-bold text-white">
                   Can I Afford This Purchase?
@@ -1113,7 +1140,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
               Ask in Plain English (mention item, price, balance, or upcoming bills):
             </label>
             <div className="flex flex-col sm:flex-row gap-2">
-              <input
+              <input aria-label="Affordability question"
                 type="text"
                 value={naturalCashflowQuery}
                 onChange={(e) => setNaturalCashflowQuery(e.target.value)}
@@ -1164,7 +1191,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                   <label className="block text-[11px] text-slate-400 mb-1">
                     Checking Balance (USD)
                   </label>
-                  <input
+                  <input aria-label="Checking balance in USD"
                     type="number"
                     value={editBalanceUsd}
                     onChange={(e) => setEditBalanceUsd(e.target.value)}
@@ -1175,7 +1202,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                   <label className="block text-[11px] text-slate-400 mb-1">
                     Safety Buffer (USD)
                   </label>
-                  <input
+                  <input aria-label="Safety buffer in USD"
                     type="number"
                     value={editBufferUsd}
                     onChange={(e) => setEditBufferUsd(e.target.value)}
@@ -1219,21 +1246,21 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                 ))}
 
                 <form onSubmit={handleAddCommitmentBill} className="grid grid-cols-12 gap-1.5 pt-1">
-                  <input
+                  <input aria-label="Bill name"
                     type="text"
                     value={newBillName}
                     onChange={(e) => setNewBillName(e.target.value)}
                     placeholder="New bill (e.g. Car Insurance)"
                     className="input-brutal col-span-5 text-xs"
                   />
-                  <input
+                  <input aria-label="Bill amount in USD"
                     type="number"
                     value={newBillUsd}
                     onChange={(e) => setNewBillUsd(e.target.value)}
                     placeholder="USD"
                     className="input-brutal col-span-3 text-xs"
                   />
-                  <input
+                  <input aria-label="Days until bill is due"
                     type="number"
                     value={newBillDays}
                     onChange={(e) => setNewBillDays(e.target.value)}
@@ -1250,14 +1277,14 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
 
           {/* Direct Item + Price Quick Calculator */}
           <form onSubmit={handleBudgetCheck} className="grid grid-cols-1 sm:grid-cols-12 gap-2">
-            <input
+            <input aria-label="Purchase item"
               type="text"
               value={spendItem}
               onChange={(e) => setSpendItem(e.target.value)}
               className="input-brutal sm:col-span-6 text-xs"
               placeholder="Item name"
             />
-            <input
+            <input aria-label="Purchase amount in USD"
               type="number"
               min="1"
               step="0.01"
@@ -1316,9 +1343,9 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                   </div>
                 </div>
                 <div className="p-2 bg-[#050507] border border-[#1E293B]">
-                  <div className="text-slate-400">PayPal Pay-in-4</div>
+                  <div className="text-slate-400">Illustrative installments</div>
                   <div className="text-sky-300 font-bold">
-                    4x {fmtUsd(Math.ceil(activeAffordability.proposedSpendCents / 4))}
+                    3 × {fmtUsd(Math.floor(activeAffordability.proposedSpendCents / 4))} + {fmtUsd(activeAffordability.proposedSpendCents - 3 * Math.floor(activeAffordability.proposedSpendCents / 4))}
                   </div>
                 </div>
               </div>
@@ -1346,7 +1373,7 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
               )}
             </div>
             <form onSubmit={handleSaveRule} className="space-y-2.5">
-              <input
+              <input aria-label="Spending rule"
                 type="text"
                 value={ruleSentence}
                 onChange={(e) => setRuleSentence(e.target.value)}
@@ -1356,20 +1383,20 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                 <button type="submit" className="btn-cobalt px-3.5 py-2 text-xs">
                   Save Spending Limit
                 </button>
-                <button
+                {isDemo && <button
                   type="button"
                   onClick={() => handleSimulateAgentPurchase('AUTO')}
                   className="btn-ghost-brutal px-3 py-2 text-xs"
                 >
                   Test $32 Auto-Pay
-                </button>
-                <button
+                </button>}
+                {isDemo && <button
                   type="button"
                   onClick={() => handleSimulateAgentPurchase('HOLD')}
                   className="btn-ghost-brutal px-3 py-2 text-xs"
                 >
                   Test $45 Hold for Review
-                </button>
+                </button>}
                 <button
                   type="button"
                   onClick={handleCreateVaultSetupToken}
@@ -1399,13 +1426,16 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                     </div>
                     <div className="text-slate-400 font-mono text-[11px]">{ho.orderId}</div>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
+                    {ho.buyerCheckoutReady && ho.approvalUrl && (
+                      <a href={ho.approvalUrl} target="_blank" rel="noreferrer" className="btn-ghost-brutal px-2.5 py-1 text-xs">Open PayPal approval</a>
+                    )}
                     <button
                       type="button"
                       onClick={() => handleResolveHold(ho.orderId, 'CAPTURE')}
                       className="btn-acid px-2.5 py-1 text-xs"
                     >
-                      Approve
+                      {ho.mode === 'LIVE_PAYPAL_SANDBOX_API' ? 'Finish approved payment' : 'Approve practice payment'}
                     </button>
                     <button
                       type="button"

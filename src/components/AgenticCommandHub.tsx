@@ -210,6 +210,7 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const recognitionRef = useRef<any>(null);
+  const hubDialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (externalHubOpen) {
@@ -222,6 +223,35 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
     setHubModalOpen(false);
     onCloseExternalHub?.();
   };
+
+  useEffect(() => {
+    if (!hubModalOpen) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const frame = requestAnimationFrame(() => hubDialogRef.current?.querySelector<HTMLElement>('button')?.focus());
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setHubModalOpen(false);
+        onCloseExternalHub?.();
+      }
+      if (event.key === 'Tab') {
+        const controls = Array.from(hubDialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled)') || []).filter((element) => element.getClientRects().length > 0);
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener('keydown', handleKey);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus();
+    };
+  }, [hubModalOpen, onCloseExternalHub]);
 
   const loadMcpStatus = useCallback(async () => {
     try {
@@ -290,62 +320,48 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
   const handleOneClickClipboardExecute = async () => {
     setAgentError('');
     try {
-      if (navigator.clipboard && navigator.clipboard.readText) {
-        const clipText = (await navigator.clipboard.readText()).trim();
-        if (clipText) {
-          setInputText(clipText);
-          await runUniversalAgent({ rawText: clipText });
-          return;
-        }
-      }
-      // Fallback if clipboard is empty or permission blocked in headless context:
-      const fallbackClip =
-        inputText.trim() ||
-        'Invoice #INV-4082 from CloudScale Studio (billing@cloudscale.io) for Q4 API Gateway Setup: $180.00 USD.';
-      setInputText(fallbackClip);
-      await runUniversalAgent({ rawText: fallbackClip });
-    } catch {
-      const fallbackClip =
-        inputText.trim() ||
-        'Invoice #INV-4082 from CloudScale Studio (billing@cloudscale.io) for Q4 API Gateway Setup: $180.00 USD.';
-      setInputText(fallbackClip);
-      await runUniversalAgent({ rawText: fallbackClip });
+      if (!navigator.clipboard?.readText) throw new Error('Clipboard access is unavailable. Paste your content into the command field.');
+      const clip = (await navigator.clipboard.readText()).trim();
+      if (!clip) throw new Error('Your clipboard is empty. Copy content, enter a command, or choose a sample.');
+      setInputText(clip);
+      setUploadedImageBase64(null);
+      setUploadedImageMime(null);
+      await runUniversalAgent({ rawText: clip, imageBase64: null, imageMimeType: null });
+    } catch (err) {
+      setAgentError((err as Error).message || 'Clipboard permission was denied. Paste your content manually.');
     }
   };
 
   const processDeviceFile = async (file: File) => {
     setAgentError('');
-    setUploadedFileName(file.name);
-
-    if (file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = async () => {
-        const dataUrl = String(reader.result || '');
-        setUploadedImageBase64(dataUrl);
-        setUploadedImageMime(file.type || 'image/png');
-        const autoCaption =
-          inputText.trim() || `Device screenshot uploaded (${file.name}) — inspect and execute.`;
-        setInputText(autoCaption);
-        await runUniversalAgent({
-          rawText: autoCaption,
-          imageBase64: dataUrl,
-          imageMimeType: file.type || 'image/png',
-          fileName: file.name,
+    try {
+      if (file.size > 4 * 1024 * 1024) throw new Error('Choose a file smaller than 4 MB.');
+      if (file.type.startsWith('image/')) {
+        if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('Use PNG, JPEG, or WebP screenshots.');
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => reject(new Error('The image could not be read.'));
+          reader.readAsDataURL(file);
         });
-      };
-      reader.readAsDataURL(file);
-    } else {
-      const text = await file.text();
-      const trimmed = text.slice(0, 12000);
-      setUploadedImageBase64(null);
-      setUploadedImageMime(null);
-      setInputText(trimmed);
-      await runUniversalAgent({
-        rawText: trimmed,
-        imageBase64: null,
-        imageMimeType: null,
-        fileName: file.name,
-      });
+        const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+        const caption = inputText.trim() || `Review the uploaded screenshot: ${file.name}`;
+        setUploadedFileName(file.name);
+        setUploadedImageBase64(base64);
+        setUploadedImageMime(file.type);
+        setInputText(caption);
+        await runUniversalAgent({ rawText: caption, imageBase64: base64, imageMimeType: file.type, fileName: file.name });
+      } else {
+        if (!/\.(txt|eml|csv|json)$/i.test(file.name)) throw new Error('Use text, email, CSV, JSON, or an image. Copy PDF content into the command field.');
+        const text = (await file.text()).slice(0, 12000);
+        setUploadedFileName(file.name);
+        setUploadedImageBase64(null);
+        setUploadedImageMime(null);
+        setInputText(text);
+        await runUniversalAgent({ rawText: text, imageBase64: null, imageMimeType: null, fileName: file.name });
+      }
+    } catch (err) {
+      setAgentError((err as Error).message);
     }
   };
 
@@ -485,24 +501,27 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
       });
       setExtSimResult(res);
       await onRefresh();
+    } catch (err) {
+      setAgentError((err as Error).message);
     } finally {
       setExtSimBusy(false);
     }
   };
 
   const handleRunExtensionSimOrder = async () => {
-    if (!extSimResult?.reviewToken) return;
+    if (!extSimResult?.signedToken) return;
     setExtSimBusy(true);
     try {
-      const orderRes = await apiFetch<Record<string, any>>('/api/scamshield/create-order', {
+      const orderRes = await apiFetch<Record<string, any>>('/api/scamshield/create-paypal-order', {
         method: 'POST',
         body: JSON.stringify({
-          reviewToken: extSimResult.reviewToken,
-          executeCapture: true,
+          signedToken: extSimResult.signedToken,
         }),
       });
       setExtSimResult((prev) => ({ ...prev, liveOrder: orderRes.order }));
       await onRefresh();
+    } catch (err) {
+      setAgentError((err as Error).message);
     } finally {
       setExtSimBusy(false);
     }
@@ -549,7 +568,7 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
         }`}
       >
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap min-w-0 items-center gap-2.5">
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-[#CCFF00] text-[#050507] font-mono text-[11px] font-bold uppercase tracking-wider">
               <Sparkles className="w-3.5 h-3.5" />
               1-Click Universal Device Agent
@@ -574,7 +593,7 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
             <input
               ref={fileInputRef}
               type="file"
-              accept=".eml,.txt,.csv,.json,.pdf,image/*"
+              accept=".eml,.txt,.csv,.json,image/png,image/jpeg,image/webp"
               className="hidden"
               onChange={(e) => {
                 const file = e.target.files?.[0];
@@ -603,6 +622,7 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
                   ? 'bg-red-500/20 border-red-400 text-red-200 animate-pulse'
                   : 'bg-[#090C14] border-[#243049] text-slate-300 hover:border-[#CCFF00] hover:text-white'
               }`}
+              aria-label={listeningVoice ? 'Stop voice input' : 'Dictate a voice command'}
               title="Dictate a voice command to AegisPay Agent"
             >
               {listeningVoice ? (
@@ -628,7 +648,7 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
               className="px-3 py-1.5 text-xs font-mono font-bold border border-[#CCFF00]/60 bg-[#050507] text-[#CCFF00] hover:bg-[#CCFF00] hover:text-[#050507] transition-colors flex items-center gap-1.5"
             >
               <Cpu className="w-3.5 h-3.5" />
-              <span>MCP ({mcpMeta?.toolsCount || 13} Tools) &amp; Extension</span>
+              <span>MCP ({mcpMeta?.toolsCount ?? '…'} Tools) &amp; Extension</span>
             </button>
           </div>
         </div>
@@ -636,7 +656,7 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
         {/* Input row */}
         <div className="flex flex-col sm:flex-row gap-2.5">
           <div className="relative flex-1">
-            <input
+            <input aria-label="Agent command or payment content"
               type="text"
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
@@ -650,7 +670,7 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
               className="w-full bg-[#050507] border border-[#243049] focus:border-[#CCFF00] px-3.5 py-2.5 text-xs sm:text-sm text-white placeholder:text-slate-500 focus:outline-none"
             />
             {uploadedFileName && (
-              <span className="absolute right-2.5 top-1/2 -translate-y-1/2 px-2 py-0.5 bg-[#0047FF]/30 border border-[#0047FF] text-[10px] font-mono text-sky-200">
+              <span className="block mt-2 max-w-full break-all px-2 py-0.5 bg-[#0047FF]/30 border border-[#0047FF] text-[10px] font-mono text-sky-200">
                 File: {uploadedFileName}
               </span>
             )}
@@ -802,11 +822,12 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
       {hubModalOpen && (
         <div
           className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto"
+          ref={hubDialogRef}
           role="dialog"
           aria-modal="true"
           aria-label="Live MCP Server and Browser Extension Hub"
         >
-          <div className="w-full max-w-5xl bg-[#070A12] border-2 border-[#CCFF00] shadow-[8px_8px_0px_#0047FF] my-8 overflow-hidden">
+          <div className="w-full max-w-5xl bg-[#070A12] border-2 border-[#CCFF00] shadow-[8px_8px_0px_#0047FF] my-8 max-h-[calc(100dvh-2rem)] overflow-y-auto">
             {/* Modal Header */}
             <div className="px-6 py-4 bg-[#050507] border-b border-[#243049] flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
@@ -816,12 +837,12 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
                     Live MCP Server &amp; Chrome Extension Command Hub
                   </h2>
                   <p className="text-xs font-mono text-slate-400">
-                    HTTP JSON-RPC 2.0 MCP Server: ONLINE ({mcpMeta?.toolsCount || 13} Tools) • Chrome MV3 Side-Panel Extension v3.2.0 Ready
+                    HTTP JSON-RPC 2.0 MCP: {mcpMeta ? `${mcpMeta.toolsCount} tools available` : 'checking connection'} · Chrome MV3 extension
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => setHubTab('mcp')}
@@ -960,7 +981,7 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
                         </button>
                       </div>
 
-                      <textarea
+                      <textarea aria-label="MCP tool arguments as JSON"
                         rows={6}
                         value={toolArgsJson}
                         onChange={(e) => setToolArgsJson(e.target.value)}
@@ -1132,14 +1153,14 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
                       </div>
 
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        <input
+                        <input aria-label="Simulator recipient"
                           type="text"
                           value={extSimPayee}
                           onChange={(e) => setExtSimPayee(e.target.value)}
                           placeholder="Detected Payee / Domain"
                           className="bg-[#090C14] border border-[#243049] px-3 py-2 text-xs text-white"
                         />
-                        <input
+                        <input aria-label="Simulator amount in USD"
                           type="text"
                           value={extSimAmount}
                           onChange={(e) => setExtSimAmount(e.target.value)}
@@ -1148,7 +1169,7 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
                         />
                       </div>
 
-                      <textarea
+                      <textarea aria-label="Simulator invoice text"
                         rows={3}
                         value={extSimInput}
                         onChange={(e) => setExtSimInput(e.target.value)}
@@ -1165,7 +1186,7 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
                           {extSimBusy ? 'Scanning DOM...' : '1-Click Scan Active Page DOM'}
                         </button>
 
-                        {extSimResult?.reviewToken && extSimResult?.verdict !== 'BLOCK' && (
+                        {extSimResult?.signedToken && extSimResult?.finalVerdict !== 'BLOCK' && (
                           <button
                             type="button"
                             disabled={extSimBusy}
@@ -1181,12 +1202,12 @@ export const AgenticCommandHub: React.FC<AgenticCommandHubProps> = ({
                         <div className="p-3 bg-[#090C14] border border-[#243049] text-xs font-mono space-y-1">
                           <div className="flex items-center justify-between">
                             <span className="font-bold text-white">
-                              Extension Verdict: {extSimResult.verdict} (Risk Score:{' '}
-                              {extSimResult.riskScore}/100)
+                              Extension Verdict: {extSimResult.finalVerdict} (Risk Score:{' '}
+                              {extSimResult.combinedRiskScore}/100)
                             </span>
-                            {extSimResult.reviewToken && (
+                            {extSimResult.signedToken && (
                               <span className="text-[#CCFF00]">
-                                Token: {String(extSimResult.reviewToken).slice(0, 18)}...
+                                Token: {String(extSimResult.signedToken.payload.tokenId).slice(0, 18)}...
                               </span>
                             )}
                           </div>

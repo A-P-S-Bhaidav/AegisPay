@@ -192,10 +192,10 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
         settled: true,
       }),
     });
-    expect(confirmRes.status).toBe(200);
+    expect(confirmRes.status).toBe(409);
     const confirmData = await confirmRes.json();
-    expect(confirmData.updated).toBe(true);
-    expect(confirmData.settled).toBe(true);
+    expect(confirmData.updated).toBe(false);
+    expect(confirmData.code).toBe('SETTLEMENT_UNVERIFIED');
 
     const blockRes = await fetch(`${baseUrl}/api/payrevive/recover`, {
       method: 'POST',
@@ -473,22 +473,22 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
       expect(tData.verification.allowed).toBe(false);
     }
 
-    const validCapRes = await fetch(`${baseUrl}/api/scamshield/capture`, {
+    const validCapRes = await fetch(`${baseUrl}/api/scamshield/capture-paypal-order`, {
       method: 'POST',
       headers: authHeaders,
       body: JSON.stringify({
-        signedToken: revData.signedToken,
+        signedToken: revData.signedToken, orderId: smartOrderData.orderId,
       }),
     });
     const validCapData = await validCapRes.json();
     expect(validCapData.captured).toBe(true);
-    expect(validCapData.paypalOrder.status).toBe('COMPLETED');
+    expect(validCapData.status).toBe('COMPLETED');
 
-    const replayCapRes = await fetch(`${baseUrl}/api/scamshield/capture`, {
+    const replayCapRes = await fetch(`${baseUrl}/api/scamshield/capture-paypal-order`, {
       method: 'POST',
       headers: authHeaders,
       body: JSON.stringify({
-        signedToken: revData.signedToken,
+        signedToken: revData.signedToken, orderId: smartOrderData.orderId,
       }),
     });
     const replayCapData = await replayCapRes.json();
@@ -632,7 +632,8 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
     expect(invRes.status).toBe(200);
     const invData = await invRes.json();
     expect(invData.invoice.invoiceId).toBeDefined();
-    expect(invData.invoice.payerViewUrl).toContain('sandbox.paypal.com');
+    expect(invData.invoice.mode).toBe('CRYPTOGRAPHIC_SANDBOX_EMULATOR');
+    expect(invData.invoice.payerViewUrl).toBe('');
 
     const proofRes = await fetch(`${baseUrl}/api/paystream/verify-proof`, {
       method: 'POST',
@@ -745,7 +746,7 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
     expect(dupData.code).toBe('EMAIL_PASSWORD_ALREADY_REGISTERED');
   });
 
-  it('seamlessly unifies Google OAuth and Email/Password accounts in both directions while preserving tenant workspace data', async () => {
+  it('rejects unauthenticated password enrollment for existing Google accounts without changing their identity or workspace', async () => {
     const unifiedStorePath = path.join(
       os.tmpdir(),
       `aegispay_oauth_unify_${process.pid}_${Date.now()}.json`
@@ -794,56 +795,24 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
     });
 
     try {
-      // Direction 1A: OAuth user submits Create Account (/api/auth/register) with same email -> links password seamlessly!
-      const linkRegRes = await fetch(`${unifiedUrl}/api/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: 'oauth-first@studio.io',
-          password: 'LinkedPassword2026!',
-          fullName: 'OAuth First Founder',
-          organization: 'Studio Alpha',
-        }),
+      const register = await fetch(`${unifiedUrl}/api/auth/register`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: oauthUserA.email, password: 'AttackerPassword2026!' }),
       });
-      expect(linkRegRes.status).toBe(200);
-      const linkRegData = await linkRegRes.json();
-      expect(linkRegData.authenticated).toBe(true);
-      expect(linkRegData.linkedFromOAuth).toBe(true);
-      expect(linkRegData.isNewAccount).toBe(false);
-      expect(linkRegData.operator.id).toBe(oauthUserA.id);
-
-      // Verify workspace data (custom $7,770 balance) was preserved seamlessly
-      const stateARes = await fetch(`${unifiedUrl}/api/state`, {
-        headers: { Authorization: `Bearer ${linkRegData.token}` },
-      });
-      const stateAData = await stateARes.json();
-      expect(stateAData.lupa.currentCheckingBalanceCents).toBe(777000);
-
-      // Subsequent /api/auth/login with that linked password works cleanly
-      const loginARes = await fetch(`${unifiedUrl}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: 'oauth-first@studio.io',
-          password: 'LinkedPassword2026!',
-        }),
-      });
-      expect(loginARes.status).toBe(200);
-
-      // Direction 1B: OAuth user submits Sign In (/api/auth/login) directly with 8+ char password -> links & signs in!
-      const linkLoginRes = await fetch(`${unifiedUrl}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: 'oauth-login-link@studio.io',
-          password: 'DirectLinkPass2026!',
-        }),
-      });
-      expect(linkLoginRes.status).toBe(200);
-      const linkLoginData = await linkLoginRes.json();
-      expect(linkLoginData.authenticated).toBe(true);
-      expect(linkLoginData.linkedFromOAuth).toBe(true);
-      expect(linkLoginData.isNewAccount).toBe(false);
+      expect(register.status).toBe(409);
+      expect((await register.json()).token).toBeUndefined();
+      for (const email of [oauthUserA.email, 'oauth-login-link@studio.io']) {
+        const login = await fetch(`${unifiedUrl}/api/auth/login`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password: 'AttackerPassword2026!' }),
+        });
+        expect(login.status).toBe(401);
+        expect((await login.json()).token).toBeUndefined();
+      }
+      await (unifiedApp as unknown as { flushStoreAsync: () => Promise<void> }).flushStoreAsync();
+      const persisted = JSON.parse(fs.readFileSync(unifiedStorePath, 'utf8'));
+      expect(persisted.users.find((u: { email: string }) => u.email === oauthUserA.email).hasPassword).toBe(false);
+      expect(persisted.tenants[oauthUserA.id].currentCheckingBalanceCents).toBe(777000);
     } finally {
       await new Promise<void>((resolve) => unifiedServer.close(() => resolve()));
       if (fs.existsSync(unifiedStorePath)) fs.unlinkSync(unifiedStorePath);
@@ -892,7 +861,8 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
         fullName: 'Attacker',
       }),
     });
-    expect(spoofRes.status).toBe(401);
+    expect(spoofRes.status).toBe(503);
+    expect(spoofRes.headers.get('set-cookie')).toBeNull();
 
     // Removed legacy /api/auth/oauth endpoint MUST NOT mint a session
     const legacyBackdoorRes = await fetch(`${baseUrl}/api/auth/oauth`, {

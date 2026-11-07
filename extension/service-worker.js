@@ -19,6 +19,8 @@ chrome.runtime.onInstalled.addListener(async () => {
     });
   });
 
+  await chrome.storage.local.remove('operatorTokenMap');
+  await chrome.storage.session.remove('demoTokenMap');
   const existing = await chrome.storage.local.get(['apiBaseUrl', 'scanHistory']);
   if (!existing.apiBaseUrl) {
     await chrome.storage.local.set({
@@ -80,69 +82,75 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
-async function getOrMintSessionToken(base) {
-  const { operatorTokenMap = {} } = await chrome.storage.local.get('operatorTokenMap');
-  if (operatorTokenMap[base]) {
-    return operatorTokenMap[base];
-  }
-  const loginRes = await fetch(`${base}/api/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      email: 'operator@aegispay.io',
-      password: 'AegisPay2026!',
-    }),
-  });
-  if (loginRes.ok) {
-    const data = await loginRes.json();
-    if (data.token) {
-      operatorTokenMap[base] = data.token;
-      await chrome.storage.local.set({ operatorTokenMap });
-      return data.token;
-    }
-  }
-  return '';
+async function getSelectedEndpoint() {
+  const { apiBaseUrl = DEFAULT_ENDPOINTS[0] } = await chrome.storage.local.get('apiBaseUrl');
+  if (!DEFAULT_ENDPOINTS.includes(apiBaseUrl)) throw new Error('Choose a supported API endpoint in the side panel.');
+  return apiBaseUrl;
 }
 
 async function fetchWithEndpointFailover(path, payload, method = 'POST') {
-  let lastError = null;
-  for (const base of DEFAULT_ENDPOINTS) {
-    try {
-      let token = await getOrMintSessionToken(base);
-      const init = {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        ...(method === 'POST' ? { body: JSON.stringify(payload || {}) } : {}),
-      };
-      let response = await fetch(`${base}${path}`, init);
-      if (response.status === 401) {
-        const { operatorTokenMap = {} } = await chrome.storage.local.get('operatorTokenMap');
-        delete operatorTokenMap[base];
-        await chrome.storage.local.set({ operatorTokenMap });
-        token = await getOrMintSessionToken(base);
-        init.headers = {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        };
-        response = await fetch(`${base}${path}`, init);
-      }
-      if (response.ok) {
-        const data = await response.json();
-        return { data, endpointUsed: base };
-      }
-    } catch (err) {
-      lastError = err;
-    }
+  const apiBaseUrl = await getSelectedEndpoint();
+  const { accountTokenMap = {} } = await chrome.storage.session.get('accountTokenMap');
+  const session = accountTokenMap[apiBaseUrl];
+  if (!session?.token) throw new Error('Sign in to your AegisPay account in the side panel first.');
+  // Use only the selected endpoint: page content never silently falls back to a remote host.
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'AegisPay-Client',
+      Authorization: `Bearer ${session.token}`,
+    },
+    ...(method === 'POST' ? { body: JSON.stringify(payload || {}) } : {}),
+    signal: AbortSignal.timeout(60000),
+  });
+  const data = await response.json();
+  if (response.status === 401) {
+    delete accountTokenMap[apiBaseUrl];
+    await chrome.storage.session.set({ accountTokenMap });
+    throw new Error('Your session expired. Sign in again in the side panel.');
   }
-  throw lastError || new Error('Could not reach localhost:8787 or aegispay-orpin.vercel.app');
+  if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
+  return { data, endpointUsed: apiBaseUrl };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     try {
+      if (message?.type === 'AEGISPAY_AUTH_STATUS') {
+        const base = await getSelectedEndpoint();
+        const { accountTokenMap = {} } = await chrome.storage.session.get('accountTokenMap');
+        sendResponse({ ok: true, authenticated: Boolean(accountTokenMap[base]?.token), email: accountTokenMap[base]?.email || '' });
+        return;
+      }
+      if (message?.type === 'AEGISPAY_SIGN_IN') {
+        const base = await getSelectedEndpoint();
+        const email = String(message.payload?.email || '').trim();
+        const password = String(message.payload?.password || '');
+        if (!email || !password) throw new Error('Enter your account email and password.');
+        const response = await fetch(`${base}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'AegisPay-Client' },
+          body: JSON.stringify({ email, password }),
+          signal: AbortSignal.timeout(30000),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.token) throw new Error(data.error || 'Sign-in failed.');
+        const { accountTokenMap = {} } = await chrome.storage.session.get('accountTokenMap');
+        accountTokenMap[base] = { token: data.token, email: data.operator?.email || email };
+        await chrome.storage.session.set({ accountTokenMap });
+        sendResponse({ ok: true, email: accountTokenMap[base].email });
+        return;
+      }
+      if (message?.type === 'AEGISPAY_SIGN_OUT') {
+        const base = await getSelectedEndpoint();
+        try { await fetchWithEndpointFailover('/api/auth/logout', {}); } catch {}
+        const { accountTokenMap = {} } = await chrome.storage.session.get('accountTokenMap');
+        delete accountTokenMap[base];
+        await chrome.storage.session.set({ accountTokenMap });
+        sendResponse({ ok: true });
+        return;
+      }
       if (message?.type === 'AEGISPAY_RUN_REVIEW') {
         const { data, endpointUsed } = await fetchWithEndpointFailover(
           '/api/scamshield/review',
@@ -175,6 +183,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           '/api/scamshield/create-paypal-order',
           message.payload
         );
+        sendResponse({ ok: true, data, endpointUsed });
+        return;
+      }
+
+      if (message?.type === 'AEGISPAY_CAPTURE_PAYPAL_ORDER') {
+        const { data, endpointUsed } = await fetchWithEndpointFailover('/api/scamshield/capture-paypal-order', message.payload);
         sendResponse({ ok: true, data, endpointUsed });
         return;
       }

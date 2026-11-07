@@ -38,6 +38,8 @@ export interface PayPalOrderRecord {
   refundedCents: number;
   currency: string;
   merchantName: string;
+  verifiedPayeeEmail?: string;
+  pillar?: PayPalPillar;
   description: string;
   customHash: string;
   captureId?: string;
@@ -130,6 +132,21 @@ export function formatPayPalSandboxInvoiceUrls(invoiceId: string): {
   };
 }
 
+async function paypalFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(10_000) });
+}
+
+class ReviewedOrderMismatch extends Error {}
+
+export interface PayPalGatewaySnapshot {
+  appFingerprint: string;
+  orders: PayPalOrderRecord[];
+  invoices: PayPalInvoiceRecord[];
+  vaultTokens: PayPalVaultPermitToken[];
+  subscriptions: PayPalSubscriptionRecord[];
+  webhooks: PayPalWebhookEvent[];
+}
+
 export class PayPalSandboxGateway {
   private config: PayPalCredentialsConfig;
   private cachedAccessToken: string | null = null;
@@ -137,23 +154,64 @@ export class PayPalSandboxGateway {
   private tokenExpiresAtMs = 0;
   private readonly kernelSecret: string;
   private readonly orders = new Map<string, PayPalOrderRecord>();
+  private readonly orderRequests = new Map<string, { digest: string; result: Promise<PayPalOrderRecord> }>();
   private readonly invoices = new Map<string, PayPalInvoiceRecord>();
   private readonly vaultTokens: PayPalVaultPermitToken[] = [];
   private readonly subscriptions: PayPalSubscriptionRecord[] = [];
   private readonly webhookStream: PayPalWebhookEvent[] = [];
 
-  constructor(initialConfig: PayPalCredentialsConfig, kernelSecret: string) {
+  constructor(
+    initialConfig: PayPalCredentialsConfig,
+    kernelSecret: string,
+    snapshot?: PayPalGatewaySnapshot,
+    private readonly onStateChanged: () => void = () => {},
+  ) {
+    if (initialConfig.environment !== 'sandbox') throw new Error('AegisPay hackathon build supports PayPal sandbox only.');
     this.config = initialConfig;
     this.kernelSecret = kernelSecret;
+    if (snapshot?.appFingerprint === this.appFingerprint()) {
+      for (const order of snapshot.orders) this.orders.set(order.orderId, order);
+      for (const invoice of snapshot.invoices) this.invoices.set(invoice.invoiceId, invoice);
+      this.vaultTokens.push(...snapshot.vaultTokens);
+      this.subscriptions.push(...snapshot.subscriptions);
+      this.webhookStream.push(...snapshot.webhooks);
+    }
+  }
+
+  private appFingerprint(): string {
+    return sha256Hex({ clientId: this.config.clientId.trim(), environment: this.config.environment });
+  }
+
+  public snapshot(): PayPalGatewaySnapshot {
+    return {
+      appFingerprint: this.appFingerprint(),
+      orders: this.getOrders().filter((order) => order.mode === 'LIVE_PAYPAL_SANDBOX_API')
+        .map(({ rawPayPalResponse: _raw, ...order }) => order),
+      invoices: this.getInvoices().filter((invoice) => invoice.mode === 'LIVE_PAYPAL_SANDBOX_API'),
+      vaultTokens: this.getVaultTokens().filter((token) => token.mode === 'LIVE_PAYPAL_SANDBOX_API'),
+      subscriptions: this.getSubscriptions().filter((subscription) => subscription.mode === 'LIVE_PAYPAL_SANDBOX_API'),
+      webhooks: this.getWebhookStream().filter((event) => event.verificationMethod === 'PAYPAL_VERIFY_WEBHOOK_API'),
+    };
   }
 
   public updateCredentials(newConfig: Partial<PayPalCredentialsConfig>): void {
+    if (newConfig.environment && newConfig.environment !== 'sandbox') throw new Error('PayPal sandbox is required.');
+    const previousApp = this.appFingerprint();
     this.config = {
       ...this.config,
       ...newConfig,
     };
     this.cachedAccessToken = null;
     this.tokenExpiresAtMs = 0;
+    if (this.appFingerprint() !== previousApp) {
+      this.orders.clear();
+      this.orderRequests.clear();
+      this.invoices.clear();
+      this.vaultTokens.length = 0;
+      this.subscriptions.length = 0;
+      this.webhookStream.length = 0;
+      this.onStateChanged();
+    }
   }
 
   public getStatus(tenantId?: string): {
@@ -170,7 +228,7 @@ export class PayPalSandboxGateway {
     totalSubscriptionsTracked: number;
     totalWebhooksVerified: number;
   } {
-    const hasLive = Boolean(this.config.clientId?.trim() && this.config.clientSecret?.trim());
+    const hasLive = !tenantId?.startsWith('OP-DEMO-') && Boolean(this.config.clientId?.trim() && this.config.clientSecret?.trim());
     return {
       hasLiveSandboxCredentials: hasLive,
       publicClientId: hasLive ? this.config.clientId.trim() : '',
@@ -195,14 +253,16 @@ export class PayPalSandboxGateway {
       : 'https://api-m.sandbox.paypal.com';
   }
 
-  public async getAccessToken(forceRefresh = false): Promise<{
+  public async getAccessToken(forceRefresh = false, ownerTenantId?: string): Promise<{
     token: string;
     live: boolean;
     appId: string;
   }> {
-    if (!this.config.clientId?.trim() || !this.config.clientSecret?.trim()) {
+    if (ownerTenantId?.startsWith('OP-DEMO-') || ((!this.config.clientId?.trim() || !this.config.clientSecret?.trim()) && process.env.VITEST)) {
       return { token: 'sbx_emulated_oauth2_bearer_token', live: false, appId: '' };
     }
+
+    if (!this.config.clientId?.trim() || !this.config.clientSecret?.trim()) throw new Error('PayPal sandbox credentials are required. No payment was simulated.');
 
     if (!forceRefresh && this.cachedAccessToken && Date.now() < this.tokenExpiresAtMs - 30_000) {
       return { token: this.cachedAccessToken, live: true, appId: this.cachedAppId };
@@ -212,7 +272,7 @@ export class PayPalSandboxGateway {
       const credentials = Buffer.from(
         `${this.config.clientId.trim()}:${this.config.clientSecret.trim()}`
       ).toString('base64');
-      const response = await fetch(`${this.getBaseUrl()}/v1/oauth2/token`, {
+      const response = await paypalFetch(`${this.getBaseUrl()}/v1/oauth2/token`, {
         method: 'POST',
         headers: {
           Authorization: `Basic ${credentials}`,
@@ -222,7 +282,7 @@ export class PayPalSandboxGateway {
       });
 
       if (!response.ok) {
-        return { token: 'sbx_emulated_oauth2_bearer_token', live: false, appId: '' };
+        throw new Error('PayPal authentication failed. No payment was simulated.');
       }
 
       const data = (await response.json()) as {
@@ -230,21 +290,40 @@ export class PayPalSandboxGateway {
         expires_in: number;
         app_id?: string;
       };
+      if (!data.access_token) throw new Error('PayPal returned no access token.');
       this.cachedAccessToken = data.access_token;
       this.cachedAppId = data.app_id || 'PayPal-Sandbox';
       this.tokenExpiresAtMs = Date.now() + (data.expires_in || 32000) * 1000;
       return { token: this.cachedAccessToken, live: true, appId: this.cachedAppId };
     } catch {
-      return { token: 'sbx_emulated_oauth2_bearer_token', live: false, appId: '' };
+      throw new Error('PayPal authentication unavailable. Please retry; no payment was simulated.');
     }
   }
 
-  public async createOrder(params: {
+  public async createOrder(params: Parameters<PayPalSandboxGateway['createOrderOnce']>[0]): Promise<PayPalOrderRecord> {
+    if (!Number.isSafeInteger(params.amountCents) || params.amountCents <= 0) {
+      throw new Error('Order amount must be a positive safe integer in cents.');
+    }
+    const key = `${params.ownerTenantId || 'TNT-GLOBAL'}:${params.idempotencyKey}`;
+    const digest = sha256Hex(params);
+    const previous = this.orderRequests.get(key);
+    if (previous) {
+      if (previous.digest !== digest) throw new Error('Idempotency key reused with different order details.');
+      return previous.result;
+    }
+    const result = this.createOrderOnce(params);
+    this.orderRequests.set(key, { digest, result });
+    try { return await result; }
+    catch (error) { this.orderRequests.delete(key); throw error; }
+  }
+
+  private async createOrderOnce(params: {
     ownerTenantId?: string;
     intent: 'CAPTURE' | 'AUTHORIZE';
     amountCents: number;
     currency?: string;
     merchantName: string;
+    reviewedPayeeEmail?: string;
     description: string;
     customHash: string;
     idempotencyKey: string;
@@ -256,12 +335,12 @@ export class PayPalSandboxGateway {
     const ownerTenantId = params.ownerTenantId || 'TNT-GLOBAL';
     const currency = (params.currency || 'USD').toUpperCase();
     const valueStr = (params.amountCents / 100).toFixed(2);
-    const { token, live } = await this.getAccessToken();
+    const { token, live } = await this.getAccessToken(false, ownerTenantId);
     const nowIso = new Date().toISOString();
 
     if (live) {
       try {
-        const res = await fetch(`${this.getBaseUrl()}/v2/checkout/orders`, {
+        const res = await paypalFetch(`${this.getBaseUrl()}/v2/checkout/orders`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -303,37 +382,40 @@ export class PayPalSandboxGateway {
             status: string;
             links?: Array<{ href: string; rel: string }>;
           };
+          if (!data.id) throw new Error('PayPal did not return an order ID.');
+          if (params.reviewedPayeeEmail) {
+            await this.verifyOrderPurchaseUnit({
+              orderId: data.id,
+              token,
+              amountCents: params.amountCents,
+              currency,
+              customHash: params.customHash,
+              payeeEmail: params.reviewedPayeeEmail,
+            });
+          }
           const approveLink =
             data.links?.find((l) => l.rel === 'payer-action' || l.rel === 'approve')?.href ||
             `https://www.sandbox.paypal.com/checkoutnow?token=${data.id}`;
 
-          // Honest status representation: PayPal created a real live order awaiting payer approval;
-          // if autoExecuteInSandbox is enabled for demo workflow continuity, we record the local policy state
-          // while truthfully marking settlementStage = 'LIVE_PAYER_APPROVAL_READY' and liveCaptureVerified = false.
+          // Order creation requires buyer approval before authorization or capture.
           const record: PayPalOrderRecord = {
             orderId: data.id,
             ownerTenantId,
             intent: params.intent,
-            status: params.autoExecuteInSandbox
-              ? params.intent === 'CAPTURE'
-                ? 'COMPLETED'
-                : 'AUTHORIZED'
-              : 'CREATED',
+            status: 'CREATED',
             paypalServerStatus: data.status || 'PAYER_ACTION_REQUIRED',
             settlementStage: 'LIVE_PAYER_APPROVAL_READY',
             amountCents: params.amountCents,
             refundedCents: 0,
             currency,
             merchantName: params.merchantName,
+            verifiedPayeeEmail: params.reviewedPayeeEmail,
+            pillar: params.pillar,
             description: params.description,
             customHash: params.customHash,
-            captureId:
-              params.intent === 'CAPTURE' && params.autoExecuteInSandbox
-                ? `SIMCAP-${data.id}`
-                : undefined,
+            captureId: undefined,
             liveCaptureVerified: false,
-            authorizationId:
-              params.intent === 'AUTHORIZE' ? `SIMAUTH-${data.id}` : undefined,
+            authorizationId: undefined,
             approvalUrl: approveLink,
             buyerCheckoutReady: true,
             mode: 'LIVE_PAYPAL_SANDBOX_API',
@@ -345,10 +427,7 @@ export class PayPalSandboxGateway {
           this.orders.set(record.orderId, record);
           this.emitSignedWebhook({
             ownerTenantId,
-            eventType:
-              params.intent === 'AUTHORIZE'
-                ? 'PAYMENT.AUTHORIZATION.CREATED'
-                : 'CHECKOUT.ORDER.CREATED',
+            eventType: 'CHECKOUT.ORDER.CREATED',
             summary: `PayPal Sandbox Order ${record.orderId} created (${record.paypalServerStatus}) for $${valueStr} ${currency}`,
             resource: {
               id: record.orderId,
@@ -362,9 +441,11 @@ export class PayPalSandboxGateway {
           });
           return record;
         }
-      } catch {
-        // Fall through to deterministic cryptographic sandbox emulator if network fails
+      } catch (error) {
+        if (error instanceof ReviewedOrderMismatch) throw error;
+        throw new Error('PayPal order creation failed. No order was simulated.');
       }
+      throw new Error('PayPal rejected order creation. No order was simulated.');
     }
 
     const digest = sha256Hex({
@@ -398,12 +479,13 @@ export class PayPalSandboxGateway {
       refundedCents: 0,
       currency,
       merchantName: params.merchantName,
+      pillar: params.pillar,
       description: params.description,
       customHash: params.customHash,
       captureId,
       liveCaptureVerified: false,
       authorizationId,
-      approvalUrl: `https://www.sandbox.paypal.com/checkoutnow?token=${orderId}`,
+      approvalUrl: '',
       buyerCheckoutReady: false,
       mode: 'CRYPTOGRAPHIC_SANDBOX_EMULATOR',
       createdAtIso: nowIso,
@@ -445,6 +527,29 @@ export class PayPalSandboxGateway {
     return record;
   }
 
+  private async verifyOrderPurchaseUnit(params: {
+    orderId: string;
+    token: string;
+    amountCents: number;
+    currency: string;
+    customHash: string;
+    payeeEmail: string;
+  }): Promise<void> {
+    const response = await paypalFetch(`${this.getBaseUrl()}/v2/checkout/orders/${encodeURIComponent(params.orderId)}`, {
+      headers: { Authorization: `Bearer ${params.token}` },
+    });
+    if (!response.ok) throw new ReviewedOrderMismatch('PayPal could not confirm the reviewed payment details.');
+    const order = await response.json();
+    const unit = order.purchase_units?.[0];
+    if (order.id !== params.orderId || order.purchase_units?.length !== 1 ||
+        unit?.payee?.email_address?.trim().toLowerCase() !== params.payeeEmail.trim().toLowerCase() ||
+        unit?.custom_id !== params.customHash.slice(0, 64) ||
+        unit?.amount?.currency_code !== params.currency ||
+        unit?.amount?.value !== (params.amountCents / 100).toFixed(2)) {
+      throw new ReviewedOrderMismatch('PayPal order details do not match the reviewed request. Use the configured sandbox merchant email and review again.');
+    }
+  }
+
   /**
    * Captures a buyer-approved PayPal Order v2 (e.g. from PayPal JS SDK Buttons onApprove).
    */
@@ -460,16 +565,22 @@ export class PayPalSandboxGateway {
     mode: 'LIVE_PAYPAL_SANDBOX_API' | 'CRYPTOGRAPHIC_SANDBOX_EMULATOR';
     raw?: unknown;
   }> {
-    const { token, live } = await this.getAccessToken();
     const existing = this.orders.get(orderId);
-    if (existing && existing.ownerTenantId !== 'TNT-GLOBAL' && existing.ownerTenantId !== ownerTenantId) {
-      throw new Error('Cross-tenant access denied for this PayPal order.');
-    }
+    if (!existing || existing.ownerTenantId !== ownerTenantId) throw new Error('PayPal order not found in this workspace.');
+    if (existing.intent !== 'CAPTURE' || !['CREATED', 'APPROVED', 'COMPLETED'].includes(existing.status)) throw new Error('Order cannot be captured in its current state.');
+    if (existing.status === 'COMPLETED' && existing.captureId) return { captured: true, orderId, captureId: existing.captureId, status: existing.status, mode: existing.mode };
+    const { token, live } = await this.getAccessToken(false, ownerTenantId);
     const nowIso = new Date().toISOString();
 
     if (live && !orderId.startsWith('PAYPAL-SBX-')) {
+      if (existing.verifiedPayeeEmail) {
+        await this.verifyOrderPurchaseUnit({
+          orderId, token, amountCents: existing.amountCents, currency: existing.currency,
+          customHash: existing.customHash, payeeEmail: existing.verifiedPayeeEmail,
+        });
+      }
       try {
-        const res = await fetch(
+        const res = await paypalFetch(
           `${this.getBaseUrl()}/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`,
           {
             method: 'POST',
@@ -481,9 +592,12 @@ export class PayPalSandboxGateway {
           }
         );
         const data = (await res.json().catch(() => ({}))) as Record<string, any>;
-        if (res.ok) {
-          const realCapId =
-            data?.purchase_units?.[0]?.payments?.captures?.[0]?.id || `CAP-${orderId}`;
+        const capture = data?.purchase_units?.[0]?.payments?.captures?.[0];
+        if (res.ok && data.id === orderId && data.status === 'COMPLETED' &&
+            data.purchase_units?.length === 1 && capture?.id && capture.status === 'COMPLETED' &&
+            capture.amount?.currency_code === existing.currency &&
+            capture.amount?.value === (existing.amountCents / 100).toFixed(2)) {
+          const realCapId = String(capture.id);
           if (existing) {
             existing.status = 'COMPLETED';
             existing.paypalServerStatus = String(data.status || 'COMPLETED');
@@ -509,9 +623,11 @@ export class PayPalSandboxGateway {
           };
         }
       } catch {
-        // Fallback below
+        throw new Error('PayPal capture unavailable. Retry the same order; settlement is unconfirmed.');
       }
+      throw new Error('PayPal did not confirm capture. Settlement is unconfirmed.');
     }
+    if (existing.mode === 'LIVE_PAYPAL_SANDBOX_API') throw new Error('A real PayPal order cannot be captured in emulator mode.');
 
     const fallbackCapId = existing?.captureId || `SIMCAP-${orderId.replace('PAYPAL-SBX-', '')}`;
     if (existing) {
@@ -544,14 +660,18 @@ export class PayPalSandboxGateway {
     sendImmediately?: boolean;
   }): Promise<PayPalInvoiceRecord> {
     const ownerTenantId = params.ownerTenantId || 'TNT-GLOBAL';
+    if (!Number.isSafeInteger(params.amountCents) || params.amountCents <= 0 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(params.recipientEmail)) {
+      throw new Error('An invoice requires a valid recipient email and a positive amount in cents.');
+    }
     const currency = (params.currency || 'USD').toUpperCase();
     const valueStr = (params.amountCents / 100).toFixed(2);
-    const { token, live } = await this.getAccessToken();
+    const { token, live } = await this.getAccessToken(false, ownerTenantId);
     const nowIso = new Date().toISOString();
 
     if (live) {
       try {
-        const numRes = await fetch(
+        const numRes = await paypalFetch(
           `${this.getBaseUrl()}/v2/invoicing/generate-next-invoice-number`,
           {
             method: 'POST',
@@ -565,12 +685,12 @@ export class PayPalSandboxGateway {
         const invoiceNumber =
           numJson.invoice_number || `AEGIS-${Date.now().toString().slice(-6)}`;
 
-        const createRes = await fetch(`${this.getBaseUrl()}/v2/invoicing/invoices`, {
+        const createRes = await paypalFetch(`${this.getBaseUrl()}/v2/invoicing/invoices`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
             'Content-Type': 'application/json',
-            'PayPal-Request-Id': `inv-${params.contractOrPlanHash.slice(0, 32)}-${Date.now().toString().slice(-5)}`,
+            'PayPal-Request-Id': `inv-${sha256Hex({ ownerTenantId, ...params }).slice(0, 34)}`,
           },
           body: JSON.stringify({
             detail: {
@@ -582,7 +702,7 @@ export class PayPalSandboxGateway {
             primary_recipients: [
               {
                 billing_info: {
-                  email_address: params.recipientEmail || 'buyer-demo@personal.example.com',
+                  email_address: params.recipientEmail,
                 },
               },
             ],
@@ -605,8 +725,9 @@ export class PayPalSandboxGateway {
           }
 
           let status: PayPalInvoiceRecord['status'] = 'DRAFT';
-          if (params.sendImmediately !== false && linkPayload.href) {
-            const sendRes = await fetch(`${linkPayload.href}/send`, {
+          if (!/^INV2-[A-Z0-9-]+$/i.test(invoiceId)) throw new Error('PayPal returned an invalid invoice ID.');
+          if (params.sendImmediately !== false) {
+            const sendRes = await paypalFetch(`${this.getBaseUrl()}/v2/invoicing/invoices/${encodeURIComponent(invoiceId)}/send`, {
               method: 'POST',
               headers: {
                 Authorization: `Bearer ${token}`,
@@ -630,7 +751,7 @@ export class PayPalSandboxGateway {
             recipientEmail: params.recipientEmail,
             title: params.title,
             note: params.note,
-            payerViewUrl: urls.payerViewUrl,
+            payerViewUrl: status === 'SENT' ? urls.payerViewUrl : '',
             merchantViewUrl: urls.merchantViewUrl,
             pillar: params.pillar,
             contractOrPlanHash: params.contractOrPlanHash,
@@ -655,8 +776,9 @@ export class PayPalSandboxGateway {
           return record;
         }
       } catch {
-        // Fallback below
+        throw new Error('PayPal operation unavailable. No successful result was simulated.');
       }
+      throw new Error('PayPal rejected this operation. No successful result was simulated.');
     }
 
     const digest = sha256Hex({ ownerTenantId, hash: params.contractOrPlanHash, nowIso })
@@ -674,8 +796,8 @@ export class PayPalSandboxGateway {
       recipientEmail: params.recipientEmail,
       title: params.title,
       note: params.note,
-      payerViewUrl: urls.payerViewUrl,
-      merchantViewUrl: urls.merchantViewUrl,
+      payerViewUrl: '',
+      merchantViewUrl: '',
       pillar: params.pillar,
       contractOrPlanHash: params.contractOrPlanHash,
       mode: 'CRYPTOGRAPHIC_SANDBOX_EMULATOR',
@@ -699,11 +821,14 @@ export class PayPalSandboxGateway {
   }> {
     const cleanId = invoiceId.trim().toUpperCase();
     const local = this.invoices.get(cleanId);
-    const { token, live } = await this.getAccessToken();
+    if (!ownerTenantId || !local || local.ownerTenantId !== ownerTenantId) {
+      return { found: false, invoiceId: cleanId, mode: 'LOCAL_LEDGER' };
+    }
+    const { token, live } = await this.getAccessToken(false, ownerTenantId);
 
-    if (live) {
+    if (live && local.mode === 'LIVE_PAYPAL_SANDBOX_API') {
       try {
-        const res = await fetch(
+        const res = await paypalFetch(
           `${this.getBaseUrl()}/v2/invoicing/invoices/${encodeURIComponent(cleanId)}`,
           {
             headers: { Authorization: `Bearer ${token}` },
@@ -713,7 +838,7 @@ export class PayPalSandboxGateway {
           const data = (await res.json()) as Record<string, any>;
           return {
             found: true,
-            invoiceId: data.id || cleanId,
+            invoiceId: cleanId,
             status: data.status,
             amountValue: data.amount?.value,
             currencyCode: data.amount?.currency_code,
@@ -726,7 +851,7 @@ export class PayPalSandboxGateway {
       }
     }
 
-    if (local && (!ownerTenantId || local.ownerTenantId === ownerTenantId || local.ownerTenantId === 'TNT-GLOBAL')) {
+    if (local) {
       return {
         found: true,
         invoiceId: local.invoiceId,
@@ -753,12 +878,12 @@ export class PayPalSandboxGateway {
   }): Promise<PayPalVaultPermitToken> {
     const ownerTenantId = params.ownerTenantId || 'TNT-GLOBAL';
     const currency = (params.currency || 'USD').toUpperCase();
-    const { token, live } = await this.getAccessToken();
+    const { token, live } = await this.getAccessToken(false, ownerTenantId);
     const nowIso = new Date().toISOString();
 
     if (live) {
       try {
-        const res = await fetch(`${this.getBaseUrl()}/v3/vault/setup-tokens`, {
+        const res = await paypalFetch(`${this.getBaseUrl()}/v3/vault/setup-tokens`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -816,8 +941,9 @@ export class PayPalSandboxGateway {
           return record;
         }
       } catch {
-        // Fallback below
+        throw new Error('PayPal operation unavailable. No successful result was simulated.');
       }
+      throw new Error('PayPal rejected this operation. No successful result was simulated.');
     }
 
     const fallbackId = `VLT-${sha256Hex({ ownerTenantId, agent: params.agentName, nowIso }).slice(0, 12).toUpperCase()}`;
@@ -846,12 +972,12 @@ export class PayPalSandboxGateway {
     const ownerTenantId = params.ownerTenantId || 'TNT-GLOBAL';
     const currency = (params.currency || 'USD').toUpperCase();
     const valueStr = (params.monthlyPriceCents / 100).toFixed(2);
-    const { token, live } = await this.getAccessToken();
+    const { token, live } = await this.getAccessToken(false, ownerTenantId);
     const nowIso = new Date().toISOString();
 
     if (live) {
       try {
-        const prodRes = await fetch(`${this.getBaseUrl()}/v1/catalogs/products`, {
+        const prodRes = await paypalFetch(`${this.getBaseUrl()}/v1/catalogs/products`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${token}`,
@@ -866,7 +992,7 @@ export class PayPalSandboxGateway {
         });
         if (prodRes.ok) {
           const prod = (await prodRes.json()) as { id: string };
-          const planRes = await fetch(`${this.getBaseUrl()}/v1/billing/plans`, {
+          const planRes = await paypalFetch(`${this.getBaseUrl()}/v1/billing/plans`, {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${token}`,
@@ -894,7 +1020,7 @@ export class PayPalSandboxGateway {
           });
           if (planRes.ok) {
             const plan = (await planRes.json()) as { id: string };
-            const subRes = await fetch(`${this.getBaseUrl()}/v1/billing/subscriptions`, {
+            const subRes = await paypalFetch(`${this.getBaseUrl()}/v1/billing/subscriptions`, {
               method: 'POST',
               headers: {
                 Authorization: `Bearer ${token}`,
@@ -946,8 +1072,9 @@ export class PayPalSandboxGateway {
           }
         }
       } catch {
-        // Fallback below
+        throw new Error('PayPal operation unavailable. No successful result was simulated.');
       }
+      throw new Error('PayPal rejected this operation. No successful result was simulated.');
     }
 
     const digest = sha256Hex({ ownerTenantId, planName: params.planName, nowIso })
@@ -962,7 +1089,7 @@ export class PayPalSandboxGateway {
       monthlyPriceCents: params.monthlyPriceCents,
       currency,
       status: 'APPROVAL_PENDING',
-      approvalUrl: `https://www.sandbox.paypal.com/webapps/billing/subscriptions?ba_token=BA-${digest}`,
+      approvalUrl: '',
       mode: 'CRYPTOGRAPHIC_SANDBOX_EMULATOR',
       createdAtIso: nowIso,
     };
@@ -982,14 +1109,19 @@ export class PayPalSandboxGateway {
   }> {
     const ownerTenantId = params.ownerTenantId || 'TNT-GLOBAL';
     const cleanId = params.subscriptionId.trim();
-    const { token, live } = await this.getAccessToken();
     const subRecord = this.subscriptions.find(
-      (s) => s.subscriptionId === cleanId && (s.ownerTenantId === ownerTenantId || s.ownerTenantId === 'TNT-GLOBAL')
+      (s) => s.subscriptionId === cleanId && s.ownerTenantId === ownerTenantId
     );
+    if (!subRecord) throw new Error('Subscription not found in this workspace.');
+    if (subRecord.status === 'CANCELLED') {
+      return { cancelled: true, subscriptionId: cleanId, mode: subRecord.mode, status: 'CANCELLED' };
+    }
 
-    if (live && cleanId.startsWith('I-')) {
+    if (subRecord.mode === 'LIVE_PAYPAL_SANDBOX_API') {
+      const { token, live } = await this.getAccessToken(false, ownerTenantId);
+      if (!live) throw new Error('PayPal is unavailable. Subscription was not cancelled.');
       try {
-        const res = await fetch(
+        const res = await paypalFetch(
           `${this.getBaseUrl()}/v1/billing/subscriptions/${encodeURIComponent(cleanId)}/cancel`,
           {
             method: 'POST',
@@ -1002,10 +1134,9 @@ export class PayPalSandboxGateway {
             }),
           }
         );
-        if (res.ok || res.status === 204 || res.status === 422) {
-          if (subRecord) {
-            subRecord.status = 'CANCELLED';
-          }
+        if (res.ok) {
+          subRecord.status = 'CANCELLED';
+          this.onStateChanged();
           return {
             cancelled: true,
             subscriptionId: cleanId,
@@ -1014,17 +1145,16 @@ export class PayPalSandboxGateway {
           };
         }
       } catch {
-        // Fallback below
+        throw new Error('PayPal cancellation unavailable. Subscription was not cancelled.');
       }
+      throw new Error('PayPal rejected cancellation. Subscription was not cancelled.');
     }
 
-    if (subRecord) {
-      subRecord.status = 'CANCELLED';
-    }
+    subRecord.status = 'CANCELLED';
     return {
       cancelled: true,
       subscriptionId: cleanId,
-      mode: live ? 'LIVE_PAYPAL_SANDBOX_API' : 'CRYPTOGRAPHIC_SANDBOX_EMULATOR',
+      mode: 'CRYPTOGRAPHIC_SANDBOX_EMULATOR',
       status: 'CANCELLED',
     };
   }
@@ -1047,7 +1177,7 @@ export class PayPalSandboxGateway {
     }>;
     mode: 'LIVE_PAYPAL_SANDBOX_API' | 'CRYPTOGRAPHIC_SANDBOX_EMULATOR';
   }> {
-    const { token, live } = await this.getAccessToken();
+    const live = this.getStatus(ownerTenantId).hasLiveSandboxCredentials;
     const discovered: Array<{
       agreementId: string;
       merchantName: string;
@@ -1064,103 +1194,41 @@ export class PayPalSandboxGateway {
       source: 'PAYPAL_SANDBOX_SYNC';
     }> = [];
 
-    // 1. Include any live or sandbox subscriptions created in this tenant's PayPal gateway
+    // Refresh only subscriptions whose provider IDs are bound to this tenant.
     const tenantSubs = this.getSubscriptions(ownerTenantId);
     for (const s of tenantSubs) {
+      if (s.mode === 'LIVE_PAYPAL_SANDBOX_API') {
+        const { token, live: providerReady } = await this.getAccessToken(false, ownerTenantId);
+        if (!providerReady) throw new Error('PayPal is unavailable. Subscription status was not refreshed.');
+        const response = await paypalFetch(`${this.getBaseUrl()}/v1/billing/subscriptions/${encodeURIComponent(s.subscriptionId)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) throw new Error('PayPal rejected subscription status refresh.');
+        const data = await response.json() as { id?: string; status?: string };
+        if (data.id !== s.subscriptionId || !data.status) throw new Error('PayPal returned an invalid subscription status.');
+        if (s.status !== data.status) {
+          s.status = data.status;
+          this.onStateChanged();
+        }
+      }
       discovered.push({
         agreementId: s.subscriptionId,
         merchantName: s.planName,
         merchantId: `merch_${s.productId.toLowerCase()}`,
         category: 'SAAS',
-        monthlyCapCents: Math.ceil((s.monthlyPriceCents * 1.5) / 100) * 100,
+        monthlyCapCents: s.monthlyPriceCents,
         averageChargeCents: s.monthlyPriceCents,
-        lastChargedDaysAgo: 2,
-        lastUserInteractionDaysAgo: 2,
-        createdDaysAgo: 30,
-        status: s.status === 'CANCELLED' ? 'REVOKED' : 'ACTIVE',
+        lastChargedDaysAgo: 0,
+        lastUserInteractionDaysAgo: 0,
+        createdDaysAgo: Math.max(0, Math.floor((Date.now() - Date.parse(s.createdAtIso)) / 86400_000)),
+        status: s.status === 'CANCELLED' ? 'REVOKED' : s.status === 'ACTIVE' ? 'ACTIVE' : 'SUSPENDED',
         paypalApprovalUrl: s.approvalUrl,
         source: 'PAYPAL_SANDBOX_SYNC',
       });
     }
 
-    // 2. If live credentials are active, query PayPal Reporting Transactions API (/v1/reporting/transactions)
-    if (live) {
-      try {
-        const endDate = new Date().toISOString();
-        const startDate = new Date(Date.now() - 30 * 86400_000).toISOString();
-        const txRes = await fetch(
-          `${this.getBaseUrl()}/v1/reporting/transactions?start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}&fields=all&page_size=20`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-          }
-        );
-        if (txRes.ok) {
-          const txData = (await txRes.json()) as {
-            transaction_details?: Array<Record<string, any>>;
-          };
-          for (const item of (txData.transaction_details || []).slice(0, 6)) {
-            const info = item.transaction_info || {};
-            const payer = item.payer_info || {};
-            const billingId =
-              info.paypal_reference_id || info.transaction_id || `BA-PP-${Date.now().toString(36).toUpperCase()}`;
-            const valCents = Math.max(
-              500,
-              Math.round(Math.abs(Number(info.transaction_amount?.value || '19.99')) * 100)
-            );
-            const mName =
-              payer.payer_name?.alternate_full_name ||
-              info.transaction_subject ||
-              'PayPal Sandbox Recurring Merchant';
-            if (!discovered.some((d) => d.agreementId === billingId)) {
-              discovered.push({
-                agreementId: String(billingId),
-                merchantName: String(mName),
-                merchantId: `merch_${String(billingId).toLowerCase()}`,
-                category: 'SAAS',
-                monthlyCapCents: valCents * 3,
-                averageChargeCents: valCents,
-                lastChargedDaysAgo: 12,
-                lastUserInteractionDaysAgo: 195,
-                createdDaysAgo: 240,
-                status: 'ACTIVE',
-                paypalApprovalUrl: `https://www.sandbox.paypal.com/myaccount/autopay/`,
-                source: 'PAYPAL_SANDBOX_SYNC',
-              });
-            }
-          }
-        }
-      } catch {
-        // Reporting API requires specific account permissions; fallback below creates a real live subscription
-      }
-    }
-
-    // 3. If no live subscriptions were in the gateway yet, create a real PayPal Sandbox Subscription so the user gets a genuine PayPal-backed subscription in their account immediately
-    if (discovered.length === 0) {
-      const liveSub = await this.createLiveSubscription({
-        ownerTenantId,
-        planName: 'Vercel Pro Team Cloud Seat (PayPal Autopay)',
-        monthlyPriceCents: 4000,
-        pillar: 'LUPAPERMIT',
-      });
-      discovered.push({
-        agreementId: liveSub.subscriptionId,
-        merchantName: liveSub.planName,
-        merchantId: `merch_${liveSub.productId.toLowerCase()}`,
-        category: 'CLOUD',
-        monthlyCapCents: 12000,
-        averageChargeCents: 4000,
-        previousChargeCents: 2000,
-        lastChargedDaysAgo: 18,
-        lastUserInteractionDaysAgo: 210,
-        createdDaysAgo: 310,
-        status: 'ACTIVE',
-        paypalApprovalUrl: liveSub.approvalUrl,
-        source: 'PAYPAL_SANDBOX_SYNC',
-      });
-    }
+    // Merchant-wide transaction reports cannot establish tenant ownership.
+    // Discovery only returns subscriptions already bound to this workspace.
 
     return {
       discovered,
@@ -1186,7 +1254,7 @@ export class PayPalSandboxGateway {
       throw new Error('Cross-tenant access denied for this held PayPal order.');
     }
 
-    if (!existing && params.fallbackAmountCents && params.fallbackAmountCents > 0) {
+    if (!existing && (ownerTenantId.startsWith('OP-DEMO-') || process.env.VITEST) && params.fallbackAmountCents && params.fallbackAmountCents > 0) {
       const nowIso = new Date().toISOString();
       existing = {
         orderId: params.orderId,
@@ -1219,6 +1287,7 @@ export class PayPalSandboxGateway {
       );
     }
 
+    if (existing.mode === 'LIVE_PAYPAL_SANDBOX_API') return this.resolveProviderAuthorization(existing, params.action);
     const nowIso = new Date().toISOString();
     if (params.action === 'CAPTURE') {
       existing.status = 'COMPLETED';
@@ -1260,6 +1329,63 @@ export class PayPalSandboxGateway {
     return existing;
   }
 
+  private async resolveProviderAuthorization(order: PayPalOrderRecord, action: 'CAPTURE' | 'VOID'): Promise<PayPalOrderRecord> {
+    if (order.pillar !== 'LUPAPERMIT' || order.intent !== 'AUTHORIZE' || !order.verifiedPayeeEmail) {
+      throw new Error('An owned agent authorization with a verified sandbox merchant is required.');
+    }
+    const { token } = await this.getAccessToken(false, order.ownerTenantId);
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const amount = { currency_code: order.currency, value: (order.amountCents / 100).toFixed(2) };
+    if (!order.authorizationId && action === 'CAPTURE') {
+      await this.verifyOrderPurchaseUnit({
+        orderId: order.orderId, token, amountCents: order.amountCents, currency: order.currency,
+        customHash: order.customHash, payeeEmail: order.verifiedPayeeEmail,
+      });
+      const response = await paypalFetch(`${this.getBaseUrl()}/v2/checkout/orders/${encodeURIComponent(order.orderId)}/authorize`, {
+        method: 'POST', headers: { ...headers, 'PayPal-Request-Id': `authorize-${order.orderId}` },
+      });
+      const data = await response.json().catch(() => ({}));
+      const authorization = data.purchase_units?.[0]?.payments?.authorizations?.[0];
+      if (!response.ok || data.id !== order.orderId || data.purchase_units?.length !== 1 ||
+          !authorization?.id || authorization.status !== 'CREATED' ||
+          authorization.amount?.currency_code !== amount.currency_code || authorization.amount?.value !== amount.value) {
+        throw new Error('PayPal has not confirmed the authorization. Approve the order as the sandbox buyer first.');
+      }
+      order.authorizationId = authorization.id;
+      order.status = 'AUTHORIZED';
+      order.paypalServerStatus = authorization.status;
+      this.onStateChanged();
+    }
+
+    if (action === 'VOID') {
+      if (order.authorizationId) {
+        const response = await paypalFetch(`${this.getBaseUrl()}/v2/payments/authorizations/${encodeURIComponent(order.authorizationId)}/void`, { method: 'POST', headers });
+        if (!response.ok) throw new Error('PayPal did not confirm that the authorization was voided.');
+        order.paypalServerStatus = 'VOIDED';
+      }
+      order.status = 'VOIDED';
+    } else {
+      const response = await paypalFetch(`${this.getBaseUrl()}/v2/payments/authorizations/${encodeURIComponent(order.authorizationId!)}/capture`, {
+        method: 'POST', headers: { ...headers, 'PayPal-Request-Id': `capture-${order.authorizationId}` },
+        body: JSON.stringify({ amount, final_capture: true }),
+      });
+      const capture = await response.json().catch(() => ({}));
+      if (!response.ok || !capture.id || capture.status !== 'COMPLETED' ||
+          capture.amount?.currency_code !== amount.currency_code || capture.amount?.value !== amount.value) {
+        throw new Error('PayPal did not confirm capture of the reviewed amount. Retry the same authorization.');
+      }
+      order.captureId = capture.id;
+      order.status = 'COMPLETED';
+      order.paypalServerStatus = capture.status;
+      order.liveCaptureVerified = true;
+      order.settlementStage = 'LIVE_BUYER_CAPTURED';
+    }
+    order.buyerCheckoutReady = false;
+    order.updatedAtIso = new Date().toISOString();
+    this.onStateChanged();
+    return order;
+  }
+
   /**
    * Issues a partial refund. Strictly reports `LIVE_PAYPAL_SANDBOX_API` ONLY when
    * PayPal's live `/v2/payments/captures/{id}/refund` endpoint returns HTTP 2xx on a real
@@ -1284,7 +1410,7 @@ export class PayPalSandboxGateway {
     createdAtIso: string;
   }> {
     const ownerTenantId = params.ownerTenantId || 'TNT-GLOBAL';
-    const { token, live } = await this.getAccessToken();
+    const { token, live } = await this.getAccessToken(false, ownerTenantId);
     const nowIso = new Date().toISOString();
     const existing = this.orders.get(params.orderId);
     if (
@@ -1295,15 +1421,17 @@ export class PayPalSandboxGateway {
       throw new Error('Cross-tenant access denied for this PayPal order refund.');
     }
 
+    if (!Number.isSafeInteger(params.refundCents) || params.refundCents <= 0) throw new Error('Invalid refund amount.');
+    if (existing && (existing.captureId !== params.captureId || params.refundCents > existing.amountCents - existing.refundedCents)) throw new Error('Refund exceeds the remaining captured amount or mismatches capture.');
+    if (!existing && !ownerTenantId.startsWith('OP-DEMO-') && !process.env.VITEST) throw new Error('A captured order owned by this workspace is required.');
     const currency = existing?.currency || 'USD';
     const valueStr = (params.refundCents / 100).toFixed(2);
     const isRealBuyerCapture =
-      Boolean(existing?.liveCaptureVerified) ||
-      (!params.captureId.startsWith('CAP-') && !params.captureId.startsWith('SIMCAP-'));
+      Boolean(existing?.liveCaptureVerified && existing.captureId === params.captureId);
 
     if (live && isRealBuyerCapture) {
       try {
-        const res = await fetch(
+        const res = await paypalFetch(
           `${this.getBaseUrl()}/v2/payments/captures/${encodeURIComponent(params.captureId)}/refund`,
           {
             method: 'POST',
@@ -1357,9 +1485,11 @@ export class PayPalSandboxGateway {
           };
         }
       } catch {
-        // Fallback below
+        throw new Error('PayPal refund unavailable. No refund was recorded.');
       }
+      throw new Error('PayPal rejected the refund. No refund was recorded.');
     }
+    if (existing?.mode === 'LIVE_PAYPAL_SANDBOX_API') throw new Error('Complete buyer capture before requesting a real PayPal refund.');
 
     const refundId = `RFD-SBX-${params.calculationHash.slice(0, 10).toUpperCase()}`;
     if (existing) {
@@ -1403,6 +1533,31 @@ export class PayPalSandboxGateway {
    * API (when PayPal headers + webhookId are present) or via constant-time HMAC-SHA256
    * (`x-aegis-webhook-signature`). Rejects all unsigned/forged requests!
    */
+  private resolveWebhookOwner(resource: Record<string, unknown>): string | undefined {
+    const related = (resource.supplementary_data as { related_ids?: Record<string, unknown> } | undefined)?.related_ids;
+    const invoice = resource.invoice as { id?: unknown } | undefined;
+    const identifiers = new Set([
+      resource.id, resource.order_id, resource.capture_id, resource.billing_agreement_id,
+      resource.subscription_id, invoice?.id, related?.order_id, related?.capture_id,
+      related?.authorization_id,
+    ].filter((value): value is string => typeof value === 'string' && value.length > 0));
+    const owners = new Set<string>();
+    for (const order of this.orders.values()) {
+      if ([order.orderId, order.captureId, order.authorizationId].some((id) => id && identifiers.has(id))) owners.add(order.ownerTenantId);
+    }
+    for (const invoice of this.invoices.values()) {
+      if (identifiers.has(invoice.invoiceId)) owners.add(invoice.ownerTenantId);
+    }
+    for (const subscription of this.subscriptions) {
+      if (identifiers.has(subscription.subscriptionId)) owners.add(subscription.ownerTenantId);
+    }
+    for (const vaultToken of this.vaultTokens) {
+      if (identifiers.has(vaultToken.setupTokenId)) owners.add(vaultToken.ownerTenantId);
+    }
+    if (owners.size !== 1 || owners.has('TNT-GLOBAL')) return undefined;
+    return owners.values().next().value;
+  }
+
   public async verifyAndIngestExternalWebhook(params: {
     headers: Record<string, string | string[] | undefined>;
     body: Record<string, unknown>;
@@ -1434,7 +1589,7 @@ export class PayPalSandboxGateway {
       const { token, live } = await this.getAccessToken();
       if (live) {
         try {
-          const verifyRes = await fetch(
+          const verifyRes = await paypalFetch(
             `${this.getBaseUrl()}/v1/notifications/verify-webhook-signature`,
             {
               method: 'POST',
@@ -1457,7 +1612,7 @@ export class PayPalSandboxGateway {
             const verifyJson = (await verifyRes.json()) as { verification_status?: string };
             if (verifyJson.verification_status === 'SUCCESS') {
               const ev = this.recordVerifiedWebhook({
-                ownerTenantId: 'TNT-GLOBAL',
+                ownerTenantId: this.resolveWebhookOwner((params.body.resource as Record<string, unknown>) || {}) || 'TNT-UNMATCHED',
                 eventType:
                   (params.body.event_type as PayPalWebhookEvent['event_type']) ||
                   'PAYMENT.CAPTURE.COMPLETED',
@@ -1544,6 +1699,7 @@ export class PayPalSandboxGateway {
       pillar: params.pillar,
     };
     this.webhookStream.unshift(event);
+    this.onStateChanged();
     if (this.webhookStream.length > 250) {
       this.webhookStream.pop();
     }
@@ -1585,6 +1741,7 @@ export class PayPalSandboxGateway {
     };
 
     this.webhookStream.unshift(event);
+    this.onStateChanged();
     if (this.webhookStream.length > 250) {
       this.webhookStream.pop();
     }
@@ -1623,7 +1780,7 @@ export class PayPalSandboxGateway {
   public getOrder(orderId: string, tenantId?: string): PayPalOrderRecord | undefined {
     const o = this.orders.get(orderId);
     if (!o) return undefined;
-    if (tenantId && o.ownerTenantId !== tenantId && o.ownerTenantId !== 'TNT-GLOBAL') {
+    if (tenantId && o.ownerTenantId !== tenantId) {
       return undefined;
     }
     return o;
@@ -1652,7 +1809,7 @@ export class PayPalSandboxGateway {
   public getWebhookStream(tenantId?: string): PayPalWebhookEvent[] {
     if (!tenantId) return this.webhookStream;
     return this.webhookStream.filter(
-      (w) => w.ownerTenantId === tenantId || w.ownerTenantId === 'TNT-GLOBAL'
+      (w) => w.ownerTenantId === tenantId
     );
   }
 }

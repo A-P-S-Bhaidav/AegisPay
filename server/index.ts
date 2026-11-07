@@ -2,6 +2,8 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import dotenv from 'dotenv';
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
 import {
   AgentSpendingPermit,
@@ -49,6 +51,7 @@ import { GeminiCognitiveEngine } from './gemini';
 import {
   clearSessionCookie,
   csrfProtectionMiddleware,
+  getAllowedOrigins,
   issueOAuthStateCookie,
   parseCookies,
   redactSecrets,
@@ -62,6 +65,7 @@ import {
 } from './security';
 import {
   AegisMultiTenantStore,
+  isPracticeWorkspaceEnabled,
   TenantWorkspace,
   verifyPasswordScrypt,
 } from './store';
@@ -183,16 +187,29 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       webhookId: process.env.PAYPAL_WEBHOOK_ID || '',
       environment: process.env.PAYPAL_ENV === 'live' ? 'live' : 'sandbox',
     },
-    kernelSecret
+    kernelSecret,
+    store.getPayPalState(),
+    () => store.scheduleFlush(),
   );
+  store.setPayPalStateSource(() => paypalGateway.snapshot());
 
-  const geminiEngine = new GeminiCognitiveEngine(
+  const configuredGeminiEngine = new GeminiCognitiveEngine(
     process.env.GEMINI_API_KEY || '',
     process.env.GEMINI_MODEL || 'gemini-3-flash-preview',
     process.env.GROQ_API_KEY || '',
     process.env.GROQ_TEXT_MODEL || 'openai/gpt-oss-120b',
     process.env.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b'
   );
+
+  const demoRequestContext = new AsyncLocalStorage<boolean>();
+  const demoGeminiEngine = new GeminiCognitiveEngine('', undefined, '', undefined, undefined, true);
+  const geminiEngine = new Proxy(configuredGeminiEngine, {
+    get(target, property) {
+      const engine = demoRequestContext.getStore() ? demoGeminiEngine : target;
+      const value = Reflect.get(engine, property, engine);
+      return typeof value === 'function' ? value.bind(engine) : value;
+    },
+  });
 
   let zapierWebhookUrl = '';
   if (process.env.ZAPIER_WEBHOOK_URL) {
@@ -314,8 +331,19 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       return null;
     }
     const { expMs: _exp, ...operator } = claims;
+    const account = store.getUserByEmail(operator.email);
+    if (operator.authProvider === 'DEMO_SANDBOX') {
+      if (operator.role !== 'DEMO_OPERATOR' || !operator.id.startsWith('OP-DEMO-')) return null;
+    } else if (!account || account.id !== operator.id || account.role !== operator.role) {
+      return null;
+    }
     return { operator, token };
   }
+
+  app.use((req, _res, next) => {
+    const resolved = resolveSessionOperator(req);
+    demoRequestContext.run(resolved?.operator.role === 'DEMO_OPERATOR', next);
+  });
 
   const requireAuth = (req: Request, res: Response, next: NextFunction) => {
     const resolved = resolveSessionOperator(req);
@@ -404,7 +432,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       version: '3.1.0',
       authRequired: true,
       authenticated: Boolean(resolved),
-      demoSandboxEnabled: process.env.ALLOW_DEMO_SANDBOX !== 'false',
+      demoSandboxEnabled: isPracticeWorkspaceEnabled(),
       paypalSandboxActive: ppStatus.hasLiveSandboxCredentials,
       paypalMode: ppStatus.activeMode,
       aiPrimaryReady: aiStatus.hasLiveGeminiKey,
@@ -464,51 +492,6 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         return;
       }
 
-      // Seamless OAuth -> Email/Password account unification:
-      // If the user previously signed in via Google OAuth and has not set an email password yet,
-      // link this password directly to their existing account & workspace without losing any data!
-      if (existing.hasPassword === false) {
-        const linked = await store.linkPasswordToUser({
-          email: normalizedEmail,
-          rawPassword: rawPass,
-          fullName: typeof fullName === 'string' && fullName.trim() ? fullName.trim() : undefined,
-          organization:
-            typeof organization === 'string' && organization.trim()
-              ? organization.trim()
-              : undefined,
-        });
-        if (!linked) {
-          res.status(500).json({ error: 'Could not link password to existing account.' });
-          return;
-        }
-
-        const { token, operator } = issueOperatorSession(linked, 'EMAIL_PASSWORD');
-        setSessionCookie(req, res, token);
-
-        const ws = store.getTenantWorkspace(operator.id, operator.email);
-        store.appendTenantAuditLog(ws, {
-          pillar: 'AUTH',
-          actor: operator.fullName,
-          eventTitle: `Linked Email Password to Google Account (${operator.email})`,
-          verdict: 'ALLOW',
-          amountCents: 0,
-          savedOrProtectedCents: 0,
-          paypalRef: operator.paypalMerchantId,
-          sha256Hash: operator.sessionTokenHash,
-          deterministicRule: 'Unified Google OAuth + scrypt Password Identity',
-        });
-
-        res.status(200).json({
-          authenticated: true,
-          isNewAccount: false,
-          linkedFromOAuth: true,
-          token,
-          operator,
-          storage: store.getStorageArchitectureSummary(operator.id),
-        });
-        return;
-      }
-
       res.status(409).json({
         code: 'EMAIL_PASSWORD_ALREADY_REGISTERED',
         error: 'An account with this email already exists. Please sign in with your password or Google.',
@@ -564,50 +547,10 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       return;
     }
 
-    // Seamless OAuth -> Email Sign-In: if this user registered via Google OAuth and has no
-    // email password yet, link their entered 8+ character password and sign them right in.
-    if (account.hasPassword === false && account.role !== 'DEMO_OPERATOR') {
-      if (rawPass.length < 8) {
-        res.status(400).json({
-          code: 'OAUTH_PASSWORD_MIN_LENGTH',
-          error:
-            'Your Google-linked account does not have an email password yet. Enter at least 8 characters to set your password and sign in, or click Continue with Google.',
-        });
-        return;
-      }
-
-      const linked = await store.linkPasswordToUser({
-        email: normalizedEmail,
-        rawPassword: rawPass,
-      });
-      if (!linked) {
-        res.status(500).json({ error: 'Could not link password to existing account.' });
-        return;
-      }
-
-      const { token, operator } = issueOperatorSession(linked, 'EMAIL_PASSWORD');
-      setSessionCookie(req, res, token);
-
-      const ws = store.getTenantWorkspace(operator.id, operator.email);
-      store.appendTenantAuditLog(ws, {
-        pillar: 'AUTH',
-        actor: operator.fullName,
-        eventTitle: `Linked Email Password & Signed In (${operator.email})`,
-        verdict: 'ALLOW',
-        amountCents: 0,
-        savedOrProtectedCents: 0,
-        paypalRef: operator.paypalMerchantId,
-        sha256Hash: operator.sessionTokenHash,
-        deterministicRule: 'Unified Google OAuth + scrypt Password Sign-In',
-      });
-
-      res.json({
-        authenticated: true,
-        isNewAccount: false,
-        linkedFromOAuth: true,
-        token,
-        operator,
-        storage: store.getStorageArchitectureSummary(operator.id),
+    if (account.hasPassword === false) {
+      res.status(401).json({
+        code: 'GOOGLE_SIGN_IN_REQUIRED',
+        error: 'Sign in with Google to access this account.',
       });
       return;
     }
@@ -646,7 +589,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
   // Explicit, isolated Demo Workspace session (non-privileged DEMO_OPERATOR role)
   app.post('/api/auth/demo', authLimiter.middleware(), (req, res) => {
-    if (process.env.ALLOW_DEMO_SANDBOX === 'false') {
+    if (!isPracticeWorkspaceEnabled()) {
       res.status(403).json({ error: 'Interactive demo sandbox is disabled in this environment.' });
       return;
     }
@@ -656,7 +599,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       return;
     }
 
-    const { token, operator } = issueOperatorSession(demoAccount, 'DEMO_SANDBOX');
+    const { token, operator } = issueOperatorSession({ ...demoAccount, id: `OP-DEMO-${crypto.randomBytes(16).toString('hex')}` }, 'DEMO_SANDBOX');
     setSessionCookie(req, res, token);
 
     const ws = store.getTenantWorkspace(operator.id, operator.email);
@@ -781,7 +724,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         hd?: string;
       };
 
-      if (!profile.email || profile.email_verified === false) {
+      if (!profile.email || profile.email_verified !== true) {
         res.redirect('/?auth_error=oauth_email_unverified');
         return;
       }
@@ -823,6 +766,10 @@ export function createAegisServer(options: AegisServerOptions = {}) {
   });
 
   app.post('/api/auth/google', authLimiter.middleware(), async (req, res) => {
+    if (!googleClientId) {
+      res.status(503).json({ error: 'Google sign-in is not configured on this server.' });
+      return;
+    }
     const { idToken } = req.body || {};
     if (typeof idToken !== 'string' || idToken.split('.').length !== 3) {
       res.status(401).json({
@@ -849,7 +796,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         hd?: string;
       };
 
-      if (googleClientId && payload.aud !== googleClientId) {
+      if (payload.aud !== googleClientId) {
         res.status(401).json({ error: 'Google ID token audience mismatch.' });
         return;
       }
@@ -1269,8 +1216,6 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       aegis_evaluate_damage_refund: 'aegispay_cliprefund_evaluate',
       aegis_save_canceling_subscriber: 'aegispay_churnrescue_intercept',
       aegis_create_milestone_plan: 'aegispay_paystream_create_plan',
-      aegis_verify_milestone_proof: 'aegispay_paystream_issue_invoice',
-      aegis_get_audit_ledger: 'aegispay_list_permits',
     };
     const toolName = ALIAS_MAP[rawToolName] || rawToolName;
 
@@ -1381,7 +1326,10 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     }
 
     if (toolName === 'aegispay_agent_pay') {
-      const permit = ws.agentPermits[0];
+      const permit = typeof args.permitId === 'string'
+        ? ws.agentPermits.find((item) => item.permitId === args.permitId)
+        : ws.agentPermits[0];
+      if (!permit) throw new Error('Create or select a spending permit before preparing a payment.');
       const numericAmount = Math.round(Number(args.amountCents) || 4500);
       const evaluation = evaluateAgentPermit(permit, {
         requestId: `MCP-REQ-${Date.now()}`,
@@ -1398,18 +1346,28 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       });
       let paypalOrder = null;
       if (evaluation.finalVerdict !== 'BLOCK') {
+        const providerPayee = String(args.merchantName || '').trim();
+        const needsPayee = paypalGateway.getStatus(ws.tenantId).hasLiveSandboxCredentials;
+        if (needsPayee && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(providerPayee)) {
+          throw new Error('Provide the configured PayPal sandbox merchant email as merchantName.');
+        }
         paypalOrder = await paypalGateway.createOrder({
           ownerTenantId: ws.tenantId,
           intent: evaluation.paypalIntent === 'CAPTURE' ? 'CAPTURE' : 'AUTHORIZE',
           amountCents: numericAmount,
           currency: 'USD',
           merchantName: String(args.merchantName || 'Verified Cloud Vendor'),
+          reviewedPayeeEmail: needsPayee ? providerPayee : undefined,
           description: `[MCP Agent] ${args.itemDescription || 'Purchase'}`,
           customHash: evaluation.auditHash,
           idempotencyKey: evaluation.auditHash,
           pillar: 'LUPAPERMIT',
           autoExecuteInSandbox: true,
         });
+        if (evaluation.finalVerdict === 'ALLOW') {
+          permit.spentTodayCents += numericAmount;
+          store.scheduleFlush();
+        }
       }
       return { evaluation, paypalOrder };
     }
@@ -1571,13 +1529,15 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     }
 
     if (toolName === 'aegispay_paystream_issue_invoice') {
-      const plan =
-        ws.milestonePlans.find((p) => p.planId === String(args.planId || '')) ||
-        ws.milestonePlans[0];
+      const plan = ws.milestonePlans.find((p) => p.planId === args.planId);
       if (!plan) throw new Error('No milestone plan found in workspace.');
-      const milestone =
-        plan.milestones.find((m) => m.milestoneId === String(args.milestoneId || '')) ||
-        plan.milestones[0];
+      const milestone = plan.milestones.find((m) => m.milestoneId === args.milestoneId);
+      if (!milestone) throw new Error('Milestone not found in plan.');
+      if (milestone.paypalInvoiceId) {
+        const invoice = paypalGateway.getInvoices(ws.tenantId).find((item) => item.invoiceId === milestone.paypalInvoiceId);
+        if (!invoice) throw new Error('An invoice was already created. Check PayPal before issuing another.');
+        return { invoice, milestone };
+      }
       const invoice = await paypalGateway.createLiveInvoice({
         ownerTenantId: ws.tenantId,
         title: `${plan.projectTitle} - ${milestone.title}`,
@@ -1586,7 +1546,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         amountCents: milestone.amountCents,
         currency: plan.currency,
         pillar: 'PAYSTREAM',
-        contractOrPlanHash: plan.planSha256,
+        contractOrPlanHash: sha256Hex({ planHash: plan.planSha256, milestoneId: milestone.milestoneId }),
         sendImmediately: true,
       });
       milestone.paypalInvoiceId = invoice.invoiceId;
@@ -1691,12 +1651,24 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     });
   });
 
+  const tenantMutationQueues = new Map<string, Promise<void>>();
+  async function lockTenantMutation(tenantId: string): Promise<() => void> {
+    const previous = tenantMutationQueues.get(tenantId) || Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => current);
+    tenantMutationQueues.set(tenantId, queued);
+    await previous;
+    return () => {
+      release();
+      if (tenantMutationQueues.get(tenantId) === queued) tenantMutationQueues.delete(tenantId);
+    };
+  }
+
   app.post('/api/mcp', mutationLimiter.middleware(), async (req, res) => {
     const body = req.body || {};
     const id = body.id ?? 1;
     const method = String(body.method || (body.tool ? 'tools/call' : 'tools/list'));
-    const ws = resolveMcpOrDemoWorkspace(req);
-
     try {
       if (method === 'initialize') {
         res.json({
@@ -1730,9 +1702,21 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       }
 
       if (method === 'tools/call') {
+        const resolved = resolveSessionOperator(req);
+        if (!resolved) {
+          res.status(401).json({ jsonrpc: '2.0', id, error: { code: -32001, message: 'Authentication required for tool execution.' } });
+          return;
+        }
+        const ws = store.getTenantWorkspace(resolved.operator.id, resolved.operator.email);
         const toolName = String(body.params?.name || body.tool || '');
         const toolArgs = (body.params?.arguments || body.arguments || {}) as Record<string, unknown>;
-        const output = await executeMcpToolCall(ws, toolName, toolArgs);
+        const release = await lockTenantMutation(ws.tenantId);
+        let output: unknown;
+        try {
+          output = await executeMcpToolCall(ws, toolName, toolArgs);
+        } finally {
+          release();
+        }
 
         store.appendTenantAuditLog(ws, {
           pillar: 'LUPAPERMIT',
@@ -1794,6 +1778,16 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     });
   });
 
+  app.use('/api', (req, res, next) => {
+    if (req.method === 'GET' || req.method === 'HEAD') { next(); return; }
+    lockTenantMutation(getWorkspace(req).tenantId).then((release) => {
+      if (res.destroyed) { release(); return; }
+      res.once('finish', release);
+      res.once('close', release);
+      next();
+    }).catch(next);
+  });
+
   // ==========================================================================
   // 2. PROTECTED TENANT STATE, RBAC CREDENTIALS & WORKSPACE ONBOARDING
   // ==========================================================================
@@ -1849,7 +1843,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         zombieAnnualExposureCents: zombieReport.totalAnnualExposureCents,
         recoverableMonthlyCents: zombieReport.recoverableMonthlyCents,
         activeAgentPermits: ws.agentPermits.filter((p) => p.active).length,
-        heldOrdersPendingApproval: tenantOrders.filter((o) => o.status === 'AUTHORIZED').length,
+        heldOrdersPendingApproval: tenantOrders.filter((o) => o.pillar === 'LUPAPERMIT' && o.intent === 'AUTHORIZE' && ['CREATED', 'AUTHORIZED'].includes(o.status)).length,
         totalAuditRecords: ws.auditLogs.length,
         livePayPalInvoicesCount: tenantInvoices.length,
         activeMilestonePlansCount: ws.milestonePlans.length,
@@ -1984,11 +1978,12 @@ export function createAegisServer(options: AegisServerOptions = {}) {
   });
 
   app.post('/api/ai/failover-test', async (req, res) => {
+    try {
     const { simulateRateLimit } = req.body || {};
     const shouldSimulate = simulateRateLimit !== undefined ? Boolean(simulateRateLimit) : true;
-    geminiEngine.setSimulateRateLimit(shouldSimulate);
+    const diagnostic = geminiEngine.createDiagnosticEngine(shouldSimulate);
 
-    const testScan = await geminiEngine.analyzePaymentScamSemantics({
+    const testScan = await diagnostic.analyzePaymentScamSemantics({
       sanitizedText: 'Invoice #8012 for Cloud Security Infrastructure: $120.00 USD',
       claimedAmountCents: 12000,
       payeeIdentifier: 'billing@cloudinfra.io',
@@ -1998,8 +1993,8 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       pillar: 'FAILOVER',
       actor: 'AI Failover Router (Gemini -> Groq)',
       eventTitle: shouldSimulate
-        ? `Gemini HTTP 429 Intercepted -> Automatic Failover to Groq (${testScan.telemetry.modelUsed || 'Groq'} in ${testScan.telemetry.latencyMs}ms)`
-        : `Primary Google Gemini (${testScan.telemetry.modelUsed || 'gemini-3-flash-preview'}) Route Restored (${testScan.telemetry.latencyMs}ms)`,
+        ? `Simulated Gemini 429; diagnostic used ${testScan.telemetry.modelUsed}`
+        : `Provider diagnostic used ${testScan.telemetry.modelUsed}`,
       verdict: shouldSimulate ? 'REROUTED' : 'ALLOW',
       amountCents: 12000,
       savedOrProtectedCents: 0,
@@ -2009,11 +2004,14 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     });
 
     res.json({
-      aiStatus: geminiEngine.getStatus(),
+      aiStatus: diagnostic.getStatus(),
       telemetry: testScan.telemetry,
       promptGuard: testScan.promptGuard,
       auditRow,
     });
+    } catch (err) {
+      res.status(503).json({ error: redactSecrets((err as Error).message) });
+    }
   });
 
   // ==========================================================================
@@ -2053,6 +2051,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         'STOLEN_OR_FRAUD_CARD',
         'REVOKED_AUTHORIZATION',
       ];
+      if (body.declineCode !== undefined && !validDeclines.includes(body.declineCode)) throw new Error('Unknown payment decline code.');
       const declineCode: PaymentDeclineCode = validDeclines.includes(body.declineCode)
         ? body.declineCode
         : baseEvent.declineCode;
@@ -2111,7 +2110,11 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       let paypalOrder = null;
       let paypalInvoice = null;
 
-      if (decision.verdict === 'EXECUTE_RECOVERY' && body.executeLivePayPal !== false) {
+      const isPractice = ws.tenantId.startsWith('OP-DEMO-') || Boolean(process.env.VITEST);
+      const explicitRecovery = body.executeLivePayPal === true && !preset && !parsedNaturalInput &&
+        typeof body.customerEmail === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.customerEmail) &&
+        Number.isSafeInteger(body.amountCents) && body.amountCents > 0 && validDeclines.includes(body.declineCode);
+      if (decision.verdict === 'EXECUTE_RECOVERY' && (explicitRecovery || (isPractice && body.executeLivePayPal !== false))) {
         if (decision.selectedArmDetails.paypalMechanism === 'PAYPAL_ORDERS_V2_RETRY') {
           const intent =
             decision.selectedAction === 'IMMEDIATE_JITTER_RETRY' ? 'CAPTURE' : 'AUTHORIZE';
@@ -2148,26 +2151,27 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
       const auditVerdict: AuditLedgerRow['verdict'] =
         decision.verdict === 'EXECUTE_RECOVERY'
-          ? 'SETTLED'
+          ? 'ALLOW'
           : decision.verdict === 'BLOCKED_BY_COMPLIANCE'
             ? 'BLOCK'
             : 'HOLD';
+
+      decision.paypalOrderId = paypalOrder?.orderId;
+      decision.paypalInvoiceId = paypalInvoice?.invoiceId;
+      store.scheduleFlush();
 
       const auditRow = appendAudit(req, {
         pillar: 'PAYREVIVE',
         actor: 'Failed Payment Recovery Engine',
         eventTitle:
           decision.verdict === 'EXECUTE_RECOVERY'
-            ? `Recovery Initiated (${decision.selectedArmDetails.actionLabel}) on $${(event.amountCents / 100).toFixed(2)} -> Expected Net +$${(decision.selectedArmDetails.expectedNetGainCents / 100).toFixed(2)}`
+            ? `${paypalOrder || paypalInvoice ? 'Recovery request created' : 'Recovery option evaluated'} (${decision.selectedArmDetails.actionLabel}) on $${(event.amountCents / 100).toFixed(2)}`
             : decision.verdict === 'BLOCKED_BY_COMPLIANCE'
               ? `Compliance Blocked Recovery on ${event.merchantOrderRef} (${event.declineCode})`
               : `Skipped Unprofitable Retry on $${(event.amountCents / 100).toFixed(2)}`,
         verdict: auditVerdict,
         amountCents: event.amountCents,
-        savedOrProtectedCents:
-          decision.verdict === 'EXECUTE_RECOVERY'
-            ? Math.max(0, decision.selectedArmDetails.expectedNetGainCents)
-            : decision.selectedArmDetails.actionCostCents,
+        savedOrProtectedCents: 0,
         paypalRef: paypalInvoice
           ? paypalInvoice.invoiceId
           : paypalOrder
@@ -2199,18 +2203,22 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       return;
     }
 
+    if (target.settlementConfirmed) {
+      res.json({ updated: false, decisionId: target.decisionId, settled: true });
+      return;
+    }
+    const order = target.paypalOrderId ? paypalGateway.getOrder(target.paypalOrderId, ws.tenantId) : undefined;
+    if (settled !== true || !order?.liveCaptureVerified || order.settlementStage !== 'LIVE_BUYER_CAPTURED' ||
+        order.amountCents !== target.event.amountCents || order.currency !== target.event.currency) {
+      res.status(409).json({ updated: false, code: 'SETTLEMENT_UNVERIFIED', error: 'A verified PayPal buyer capture is required before the model can learn a successful outcome.' });
+      return;
+    }
     const tenantBandit = getTenantBandit(ws);
-    tenantBandit.updateOutcomeForEvent(target.event, target.selectedAction, Boolean(settled));
-    target.settlementConfirmed = Boolean(settled);
+    tenantBandit.updateOutcomeForEvent(target.event, target.selectedAction, true);
+    target.settlementConfirmed = true;
     ws.payreviveBanditState = tenantBandit.exportState();
     store.scheduleFlush();
-
-    res.json({
-      updated: true,
-      decisionId: target.decisionId,
-      selectedAction: target.selectedAction,
-      settled: Boolean(settled),
-    });
+    res.json({ updated: true, decisionId: target.decisionId, selectedAction: target.selectedAction, settled: true });
   });
 
   app.post('/api/payrevive/benchmark', (req, res) => {
@@ -2968,7 +2976,11 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         aiSuggestedVerdict,
       } = req.body || {};
 
-      const permit = ws.agentPermits.find((p) => p.permitId === permitId) || ws.agentPermits[0];
+      const permit = ws.agentPermits.find((p) => p.permitId === permitId);
+      if (!permit) {
+        res.status(404).json({ error: 'Select a spending permit from this workspace.' });
+        return;
+      }
       const reqId = `REQ-${Date.now()}`;
       const numericAmount = Math.round(Number(amountCents) || 4500);
       const numericConfidence = Math.max(0, Math.min(1, Number(aiConfidenceScore ?? 0.9)));
@@ -2994,12 +3006,19 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
       let paypalOrder = null;
       if (evaluation.finalVerdict === 'ALLOW' || evaluation.finalVerdict === 'HOLD') {
+        const providerPayee = String(merchantName || '').trim();
+        const needsPayee = paypalGateway.getStatus(ws.tenantId).hasLiveSandboxCredentials;
+        if (needsPayee && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(providerPayee)) {
+          res.status(400).json({ error: 'Provide the configured PayPal sandbox merchant email as merchantName.' });
+          return;
+        }
         paypalOrder = await paypalGateway.createOrder({
           ownerTenantId: ws.tenantId,
           intent: evaluation.paypalIntent === 'CAPTURE' ? 'CAPTURE' : 'AUTHORIZE',
           amountCents: numericAmount,
           currency: 'USD',
           merchantName: String(merchantName || 'NordicLight Studio Hardware'),
+          reviewedPayeeEmail: needsPayee ? providerPayee : undefined,
           description: `[${permit.agentName}] ${itemDescription}`,
           customHash: evaluation.auditHash,
           idempotencyKey: evaluation.auditHash,
@@ -3041,6 +3060,10 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const ws = getWorkspace(req);
       const { orderId, action, operatorNote, fallbackAmountCents, fallbackMerchantName } =
         req.body || {};
+      if (action !== 'CAPTURE' && action !== 'VOID') {
+        res.status(400).json({ error: 'Choose CAPTURE or VOID for an owned held order.' });
+        return;
+      }
       const resolvedOrder = await paypalGateway.resolveHeldAuthorization({
         ownerTenantId: ws.tenantId,
         orderId: String(orderId),
@@ -3091,21 +3114,23 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         payeeIdentifier,
         imageBase64,
         imageMimeType,
-        autoExtractCurrency,
       } = req.body || {};
-      const text = String(rawText || '');
-      const fx = await getLiveOrFallbackFxRates();
-      const extracted = extractPaymentRequestMetadata(text, fx.rates);
-
-      let amount = Math.max(100, Math.round(Number(claimedAmountCents) || 4500));
-      if (autoExtractCurrency && extracted.convertedUsdCents) {
-        amount = extracted.convertedUsdCents;
-      }
-
+      const text = typeof rawText === 'string' ? rawText.trim() : '';
+      const amount = Number(claimedAmountCents);
       const curr = String(currency || 'USD').toUpperCase();
-      const payee = String(
-        payeeIdentifier || extracted.detectedPayee || 'billing@verified-studio.io'
-      ).trim();
+      const payee = typeof payeeIdentifier === 'string' ? payeeIdentifier.trim() : '';
+      if (!Number.isSafeInteger(amount) || amount <= 0 || !payee ||
+          !['USD', 'EUR', 'GBP', 'INR'].includes(curr) || (!text && typeof imageBase64 !== 'string')) {
+        res.status(400).json({ error: 'Provide an invoice, a recipient, a supported currency, and a positive amount in cents.' });
+        return;
+      }
+      let extracted = extractPaymentRequestMetadata(text);
+      let fxLive = false;
+      if (extracted.detectedCurrencyOriginal && extracted.detectedCurrencyOriginal !== 'USD') {
+        const fx = await getLiveOrFallbackFxRates();
+        extracted = extractPaymentRequestMetadata(text, fx.rates);
+        fxLive = fx.live;
+      }
 
       const detResult = evaluatePaymentScamDeterministically({
         rawText: text,
@@ -3135,8 +3160,16 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         aiResult.aiSuggestedVerdict
       );
       let combinedRiskScore = Math.max(detResult.riskScore, aiResult.semanticRiskScore);
+      const reviewNotes: string[] = [];
+      if (extracted.detectedAmountOriginal !== null &&
+          (extracted.detectedCurrencyOriginal !== curr || Math.round(extracted.detectedAmountOriginal * 100) !== amount)) {
+        reviewNotes.push('The amount or currency in the invoice differs from the amount entered. Check the request before paying.');
+      }
 
       if (liveInvoiceLookup && !liveInvoiceLookup.found) {
+        reviewNotes.push('The PayPal invoice could not be verified for this workspace.');
+      }
+      if (reviewNotes.length) {
         finalVerdict = stricterVerdict(finalVerdict, 'HOLD');
         combinedRiskScore = Math.max(combinedRiskScore, 45);
       }
@@ -3174,11 +3207,12 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         ai: aiResult,
         extractedMetadata: extracted,
         liveInvoiceLookup,
-        fxLive: fx.live,
+        fxLive,
+        reviewNotes,
         finalVerdict,
         combinedRiskScore,
         signedToken,
-        paypalCheckoutUnlocked: finalVerdict !== 'BLOCK',
+        paypalCheckoutUnlocked: finalVerdict === 'ALLOW',
         auditRow,
       });
     } catch (err) {
@@ -3190,26 +3224,44 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     try {
       const ws = getWorkspace(req);
       const { signedToken } = req.body || {};
-      const token: SignedScamShieldToken | undefined =
-        signedToken || lastIssuedScamTokenByTenant.get(ws.tenantId);
-      if (!token || token.payload.verdict === 'BLOCK') {
+      const token: SignedScamShieldToken | undefined = signedToken;
+      const verification = getTenantScamVault(ws.tenantId).verifyAndConsumeForCapture({
+        signedToken: token,
+        orderId: '',
+        captureAmountCents: token?.payload?.amountCents ?? 0,
+        currency: token?.payload?.currency ?? '',
+        payeeIdentifier: token?.payload?.payeeIdentifier ?? '',
+        consume: false,
+      });
+      if (!verification.allowed || !token || token.payload.verdict !== 'ALLOW') {
         res.status(403).json({
           error: 'This payment was flagged as unsafe and cannot proceed to PayPal checkout.',
         });
         return;
       }
 
+      const reviewedPayeeEmail = token.payload.payeeIdentifier.trim().toLowerCase();
+      const isProviderOrder = paypalGateway.getStatus(ws.tenantId).hasLiveSandboxCredentials;
+      if (isProviderOrder && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(reviewedPayeeEmail)) {
+        res.status(400).json({ error: 'Enter the configured PayPal sandbox merchant email and review the payment again.' });
+        return;
+      }
+      const origin = req.get('origin');
+      const returnOrigin = origin && getAllowedOrigins().has(origin) ? origin : undefined;
       const order = await paypalGateway.createOrder({
         ownerTenantId: ws.tenantId,
         intent: 'CAPTURE',
         amountCents: token.payload.amountCents,
         currency: token.payload.currency,
         merchantName: token.payload.payeeIdentifier,
+        reviewedPayeeEmail: isProviderOrder ? reviewedPayeeEmail : undefined,
         description: `Verified Payment (${token.payload.tokenId})`,
         customHash: token.signature,
-        idempotencyKey: `btn-${token.payload.tokenId}-${Date.now().toString().slice(-4)}`,
+        idempotencyKey: `btn-${token.payload.tokenId}`,
         pillar: 'SCAMSHIELD',
         autoExecuteInSandbox: false,
+        returnUrl: returnOrigin && `${returnOrigin}/?paypal_status=approved`,
+        cancelUrl: returnOrigin && `${returnOrigin}/?paypal_status=cancelled`,
       });
 
       res.json({ orderId: order.orderId, approvalUrl: order.approvalUrl, order });
@@ -3223,20 +3275,24 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const ws = getWorkspace(req);
       const scamVault = getTenantScamVault(ws.tenantId);
       const { orderId, signedToken } = req.body || {};
-      const token: SignedScamShieldToken | undefined =
-        signedToken || lastIssuedScamTokenByTenant.get(ws.tenantId);
-      if (token) {
-        const check = scamVault.verifyAndConsumeForCapture({
-          signedToken: token,
-          orderId: String(orderId),
-          captureAmountCents: token.payload.amountCents,
-          currency: token.payload.currency,
-          payeeIdentifier: token.payload.payeeIdentifier,
-        });
-        if (!check.allowed) {
-          res.status(403).json({ captured: false, verification: check });
-          return;
-        }
+      const token: SignedScamShieldToken | undefined = signedToken;
+      const order = paypalGateway.getOrder(String(orderId), ws.tenantId);
+      if (!token || token.payload?.verdict !== 'ALLOW' || !order || order.customHash !== token.signature ||
+          (order.mode === 'LIVE_PAYPAL_SANDBOX_API' && !order.verifiedPayeeEmail)) {
+        res.status(403).json({ captured: false, error: 'A valid review token bound to this workspace order is required.' });
+        return;
+      }
+      const captureCheck = {
+        signedToken: token,
+        orderId: order.orderId,
+        captureAmountCents: order.amountCents,
+        currency: order.currency,
+        payeeIdentifier: order.merchantName,
+      };
+      const check = scamVault.verifyAndConsumeForCapture({ ...captureCheck, consume: false });
+      if (!check.allowed) {
+        res.status(403).json({ captured: false, verification: check });
+        return;
       }
 
       const captureRes = await paypalGateway.captureLiveOrder(
@@ -3244,12 +3300,15 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         'SCAMSHIELD',
         ws.tenantId
       );
+      scamVault.verifyAndConsumeForCapture(captureCheck);
       const auditRow = appendAudit(req, {
         pillar: 'SCAMSHIELD',
         actor: 'PayPal Checkout',
-        eventTitle: `Buyer-Approved PayPal Order ${captureRes.orderId} Captured (${captureRes.captureId})`,
-        verdict: 'SETTLED',
-        amountCents: token?.payload.amountCents || 4500,
+        eventTitle: captureRes.mode === 'LIVE_PAYPAL_SANDBOX_API'
+          ? `PayPal captured order ${captureRes.orderId} (${captureRes.captureId})`
+          : `Practice capture completed for ${captureRes.orderId}`,
+        verdict: captureRes.mode === 'LIVE_PAYPAL_SANDBOX_API' ? 'SETTLED' : 'ALLOW',
+        amountCents: order.amountCents,
         savedOrProtectedCents: 0,
         paypalRef: captureRes.captureId,
         sha256Hash: sha256Hex(captureRes),
@@ -3267,6 +3326,10 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const ws = getWorkspace(req);
       const scamVault = getTenantScamVault(ws.tenantId);
       const { signedToken, tamperScenario } = req.body || {};
+      if (!['MUTATE_AMOUNT', 'FORGE_SIGNATURE', 'EXPIRED_TOKEN', 'NEVER_REVIEWED', 'PAYEE_SWAP'].includes(tamperScenario)) {
+        res.status(400).json({ captured: false, error: 'This endpoint only tests checkout tampering. Use the verified checkout flow to pay.' });
+        return;
+      }
       const baseToken: SignedScamShieldToken | null =
         signedToken || lastIssuedScamTokenByTenant.get(ws.tenantId) || null;
 
@@ -3301,6 +3364,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         currency,
         payeeIdentifier,
         nowMs: simulatedNowMs,
+        consume: false,
       });
 
       if (!verification.allowed) {
@@ -3328,37 +3392,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         return;
       }
 
-      const paypalOrder = await paypalGateway.createOrder({
-        ownerTenantId: ws.tenantId,
-        intent: 'CAPTURE',
-        amountCents: captureAmountCents,
-        currency,
-        merchantName: payeeIdentifier,
-        description: `Verified Checkout (${tokenToVerify!.payload.tokenId})`,
-        customHash: tokenToVerify!.signature,
-        idempotencyKey: tokenToVerify!.payload.tokenId,
-        pillar: 'SCAMSHIELD',
-        autoExecuteInSandbox: true,
-      });
-
-      const auditRow = appendAudit(req, {
-        pillar: 'SCAMSHIELD',
-        actor: 'Checkout Lock',
-        eventTitle: `Created Verified PayPal Order ${paypalOrder.orderId} ($${(captureAmountCents / 100).toFixed(2)})`,
-        verdict: 'SETTLED',
-        amountCents: captureAmountCents,
-        savedOrProtectedCents: 0,
-        paypalRef: paypalOrder.orderId,
-        sha256Hash: tokenToVerify!.signature,
-        deterministicRule: verification.reason,
-      });
-
-      res.json({
-        captured: true,
-        verification,
-        paypalOrder,
-        auditRow,
-      });
+      res.json({ captured: false, verification });
     } catch (err) {
       res.status(400).json({ error: redactSecrets((err as Error).message) });
     }
@@ -3786,7 +3820,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const resolvedNote = String(
         customerNote || parsedNaturalInput?.customerNote || 'Arrived with a chip on the upper rim.'
       );
-      const orderCents = Math.max(
+      let orderCents = Math.max(
         500,
         Math.round(Number(originalOrderCents ?? parsedNaturalInput?.originalOrderCents) || 2800)
       );
@@ -3795,6 +3829,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
       const targetOrderId = String(orderId || 'PAYPAL-SBX-8F92A1C4E7B01');
       const existingOrder = paypalGateway.getOrder(targetOrderId, ws.tenantId);
+      if (existingOrder) orderCents = existingOrder.amountCents;
       const targetCaptureId =
         existingOrder?.captureId || `SIMCAP-${targetOrderId.replace('PAYPAL-SBX-', '')}`;
 
@@ -3802,8 +3837,8 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const imageSeed = simulateReplayAttack
         ? 'REPLAY_IMAGE_STATIC_DIGEST'
         : imageBase64
-          ? `${imageBase64.slice(0, 512)}_${Date.now()}`
-          : `${effectivePresetId || resolvedItemTitle}_${resolvedNote}_${Date.now()}`;
+          ? imageBase64
+          : `${effectivePresetId || resolvedItemTitle}_${resolvedNote}`;
       const imageSha256 = sha256Hex(imageSeed);
 
       if (simulateReplayAttack) {
@@ -3848,13 +3883,6 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
       let paypalRefund = null;
       if (calculation.approved && calculation.refundCents > 0) {
-        ws.claimedVisionImageHashes.push(imageSha256);
-        if (ws.claimedVisionImageHashes.length > 500) {
-          ws.claimedVisionImageHashes = ws.claimedVisionImageHashes.slice(-500);
-        }
-        ws.refundedCentsByCapture[targetCaptureId] = prevRefunded + calculation.refundCents;
-        store.scheduleFlush();
-
         paypalRefund = await paypalGateway.issuePartialRefund({
           ownerTenantId: ws.tenantId,
           orderId: targetOrderId,
@@ -3863,6 +3891,13 @@ export function createAegisServer(options: AegisServerOptions = {}) {
           reasonNote: calculation.explanation,
           calculationHash: calculation.calculationHash,
         });
+        ws.claimedVisionImageHashes.push(imageSha256);
+        if (ws.claimedVisionImageHashes.length > 500) {
+          ws.claimedVisionImageHashes = ws.claimedVisionImageHashes.slice(-500);
+        }
+        ws.refundedCentsByCapture[targetCaptureId] = prevRefunded + calculation.refundCents;
+        store.scheduleFlush();
+
       }
 
       const unitEconomics = {
@@ -4207,27 +4242,28 @@ export function createAegisServer(options: AegisServerOptions = {}) {
   app.post('/api/paystream/issue-invoice', async (req, res) => {
     try {
       const ws = getWorkspace(req);
-      const { planId, milestoneId, planSnapshot } = req.body || {};
-      let plan = ws.milestonePlans.find((p) => p.planId === String(planId || ''));
-      if (!plan && planSnapshot && typeof planSnapshot === 'object' && planSnapshot.planId) {
-        plan = planSnapshot as SmartMilestonePlan;
-        ws.milestonePlans.unshift(plan);
-      }
-      if (!plan) {
-        plan = ws.milestonePlans[0];
-      }
+      const { planId, milestoneId } = req.body || {};
+      const plan = ws.milestonePlans.find((p) => p.planId === planId);
       if (!plan) {
         res.status(404).json({ error: 'Milestone plan not found.' });
         return;
       }
 
-      const milestone =
-        plan.milestones.find((m) => m.milestoneId === milestoneId) || plan.milestones[0];
+      const milestone = plan.milestones.find((m) => m.milestoneId === milestoneId);
       if (!milestone) {
         res.status(404).json({ error: 'Milestone not found in plan.' });
         return;
       }
 
+      if (milestone.paypalInvoiceId) {
+        const invoice = paypalGateway.getInvoices(ws.tenantId).find((item) => item.invoiceId === milestone.paypalInvoiceId);
+        if (!invoice) {
+          res.status(409).json({ error: 'An invoice was already created. Check PayPal before issuing another.' });
+          return;
+        }
+        res.json({ plan, milestone, invoice });
+        return;
+      }
       const invoice = await paypalGateway.createLiveInvoice({
         ownerTenantId: ws.tenantId,
         title: `${plan.projectTitle} - ${milestone.title}`,
@@ -4236,7 +4272,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         amountCents: milestone.amountCents,
         currency: plan.currency,
         pillar: 'PAYSTREAM',
-        contractOrPlanHash: plan.planSha256,
+        contractOrPlanHash: sha256Hex({ planHash: plan.planSha256, milestoneId }),
         sendImmediately: true,
       });
 
@@ -4248,8 +4284,8 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const auditRow = appendAudit(req, {
         pillar: 'PAYSTREAM',
         actor: 'PayPal Invoicing',
-        eventTitle: `Sent PayPal Invoice ${invoice.invoiceId} for ${milestone.title} ($${(milestone.amountCents / 100).toFixed(2)})`,
-        verdict: 'SETTLED',
+        eventTitle: `${invoice.mode === 'LIVE_PAYPAL_SANDBOX_API' ? 'Created PayPal invoice' : 'Created practice invoice'} ${invoice.invoiceId} for ${milestone.title}`,
+        verdict: 'ALLOW',
         amountCents: milestone.amountCents,
         savedOrProtectedCents: 0,
         paypalRef: invoice.invoiceId,
@@ -4271,7 +4307,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
   app.post('/api/paystream/verify-proof', async (req, res) => {
     try {
       const ws = getWorkspace(req);
-      const { planId, milestoneId, evidenceText, evidenceUrl, imageBase64, planSnapshot } =
+      const { planId, milestoneId, evidenceText, evidenceUrl, imageBase64 } =
         req.body || {};
 
       let safeEvidenceUrl: string | undefined;
@@ -4284,21 +4320,13 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         safeEvidenceUrl = urlCheck.normalizedUrl;
       }
 
-      let plan = ws.milestonePlans.find((p) => p.planId === String(planId || ''));
-      if (!plan && planSnapshot && typeof planSnapshot === 'object' && planSnapshot.planId) {
-        plan = planSnapshot as SmartMilestonePlan;
-        ws.milestonePlans.unshift(plan);
-      }
-      if (!plan) {
-        plan = ws.milestonePlans[0];
-      }
+      const plan = ws.milestonePlans.find((p) => p.planId === planId);
       if (!plan) {
         res.status(404).json({ error: 'Milestone plan not found.' });
         return;
       }
 
-      const milestone =
-        plan.milestones.find((m) => m.milestoneId === milestoneId) || plan.milestones[0];
+      const milestone = plan.milestones.find((m) => m.milestoneId === milestoneId);
       if (!milestone) {
         res.status(404).json({ error: 'Milestone not found in plan.' });
         return;

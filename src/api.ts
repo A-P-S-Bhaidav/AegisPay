@@ -298,6 +298,8 @@ export interface WorkspaceState {
   };
   orders: Array<{
     orderId: string;
+    pillar?: string;
+    buyerCheckoutReady?: boolean;
     intent: string;
     status: string;
     paypalServerStatus: string;
@@ -379,8 +381,12 @@ export async function apiFetch<T = any>(
     credentials: 'include',
   });
 
-  const data = await res.json().catch(() => ({}));
+  const data = await res.json().catch(() => {
+    if (res.ok) throw new Error('The server returned an unreadable response. Please try again.');
+    return {};
+  });
   if (!res.ok) {
+    if (res.status === 401) window.dispatchEvent(new Event('aegispay:session-expired'));
     const err = new Error(data?.error || `Request failed (${res.status})`) as Error & {
       status?: number;
       data?: unknown;

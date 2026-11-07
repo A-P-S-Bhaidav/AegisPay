@@ -19,6 +19,7 @@ import type {
   SerializedBanditState,
 } from '../shared/payrevive';
 import type { AuditLedgerRow, AuthenticatedOperator } from './index';
+import type { PayPalGatewaySnapshot } from './paypal';
 
 // ============================================================================
 // AEGISPAY MULTI-TENANT PERSISTENT DATA STORE + ASYNC WRITE QUEUE + LRU CACHE
@@ -66,6 +67,7 @@ interface PersistedVaultSchema {
   users: StoredUserRecord[];
   revokedTokenHashes: string[];
   tenants: Record<string, TenantWorkspace>;
+  paypalState?: PayPalGatewaySnapshot;
 }
 
 const SCRYPT_N = 16384;
@@ -100,6 +102,17 @@ export function createDefaultTenantWorkspace(
   tenantId: string,
   ownerEmail: string
 ): TenantWorkspace {
+  if (!process.env.VITEST && !tenantId.startsWith('OP-DEMO-')) {
+    return {
+      tenantId, ownerEmail, billingPermissions: [], cashflowCommitments: [],
+      currentCheckingBalanceCents: 0, minimumSafetyBufferCents: 0, agentPermits: [],
+      milestonePlans: [], auditLogs: [], signedContracts: [], payreviveDecisions: [],
+      payreviveBanditState: {}, lastPayReviveBenchmark: null,
+      merchantPolicy: JSON.parse(JSON.stringify(DEFAULT_MERCHANT_REFUND_POLICY)),
+      claimedVisionImageHashes: [], refundedCentsByCapture: {}, tutorialCompleted: false,
+      updatedAtIso: new Date().toISOString(),
+    };
+  }
   const initialPayStreamPlan = computePennyExactMilestonePlan({
     projectTitle: 'Web Platform Redesign & Checkout Launch',
     clientEmail: 'client-billing@acme-studio.io',
@@ -350,10 +363,15 @@ export interface PersistentStoreOptions {
   maxAuditLogsPerTenant?: number;
 }
 
+export function isPracticeWorkspaceEnabled(): boolean {
+  return process.env.ALLOW_DEMO_SANDBOX === 'true' ||
+    (Boolean(process.env.VITEST) && process.env.ALLOW_DEMO_SANDBOX !== 'false');
+}
+
 export class AegisMultiTenantStore {
   private readonly storeFilePath: string;
   private readonly storageMode:
-    | 'LOCAL_ENCRYPTED_FS_VAULT'
+    | 'LOCAL_PERMISSION_RESTRICTED_FS_VAULT'
     | 'SERVERLESS_STATELESS_HMAC_WITH_TMP_CACHE'
     | 'ISOLATED_TEST_VAULT';
   private readonly maxHotTenants: number;
@@ -364,6 +382,8 @@ export class AegisMultiTenantStore {
   private readonly revokedTokenHashes = new Set<string>();
   private readonly hotTenants = new Map<string, TenantWorkspace>();
   private persistedTenantsSnapshot: Record<string, TenantWorkspace> = {};
+  private paypalState?: PayPalGatewaySnapshot;
+  private readPayPalState?: () => PayPalGatewaySnapshot;
 
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private activeWritePromise: Promise<void> | null = null;
@@ -375,7 +395,7 @@ export class AegisMultiTenantStore {
 
     if (opts.customFilePath) {
       this.storeFilePath = opts.customFilePath;
-      this.storageMode = 'LOCAL_ENCRYPTED_FS_VAULT';
+      this.storageMode = 'LOCAL_PERMISSION_RESTRICTED_FS_VAULT';
     } else if (process.env.VITEST) {
       const randId = crypto.randomBytes(6).toString('hex');
       this.storeFilePath = path.join(os.tmpdir(), `aegispay_vitest_${randId}.store.json`);
@@ -387,7 +407,7 @@ export class AegisMultiTenantStore {
       const dataDir = path.join(opts.rootDir, 'data');
       fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
       this.storeFilePath = path.join(dataDir, 'aegispay_store.json');
-      this.storageMode = 'LOCAL_ENCRYPTED_FS_VAULT';
+      this.storageMode = 'LOCAL_PERMISSION_RESTRICTED_FS_VAULT';
     }
 
     this.loadFromDiskSyncOnBoot();
@@ -404,21 +424,29 @@ export class AegisMultiTenantStore {
    */
   public resolveKernelSecret(): string {
     const fromEnv = (process.env.AEGIS_KERNEL_SECRET || '').trim();
-    if (fromEnv.length >= 24) {
+    if ((process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) && (!fromEnv || fromEnv === 'aegispay-deterministic-kernel-hmac-v1-2026' || fromEnv.length < 32)) {
+      throw new Error('Serverless deployment requires a private AEGIS_KERNEL_SECRET of at least 32 characters.');
+    }
+    if (fromEnv.length >= 24 && fromEnv !== 'aegispay-deterministic-kernel-hmac-v1-2026') {
       return fromEnv;
     }
     return this.vaultKernelSecret;
   }
 
   private ensureDefaultSandboxAccounts(): void {
-    const allowSandboxSeed = process.env.ALLOW_DEMO_SANDBOX !== 'false';
-    if (!allowSandboxSeed) return;
+    const legacyOperator = this.usersByEmail.get('operator@aegispay.io');
+    if (!process.env.VITEST && legacyOperator?.id === 'OP-AEGIS-001' &&
+        verifyPasswordScrypt('AegisPay2026!', legacyOperator.passwordScrypt)) {
+      this.usersByEmail.delete('operator@aegispay.io');
+      this.scheduleFlush();
+    }
+    if (!isPracticeWorkspaceEnabled() && !process.env.VITEST) return;
 
     const now = new Date().toISOString();
     const demoSalt = sha256Hex('aegis-sandbox-seed-salt-v3').slice(0, 32);
 
     const defaultOperator = 'operator@aegispay.io';
-    if (!this.usersByEmail.has(defaultOperator)) {
+    if (process.env.VITEST && !this.usersByEmail.has(defaultOperator)) {
       this.usersByEmail.set(defaultOperator, {
         id: 'OP-AEGIS-001',
         email: defaultOperator,
@@ -495,6 +523,11 @@ export class AegisMultiTenantStore {
       if (parsed.tenants && typeof parsed.tenants === 'object') {
         this.persistedTenantsSnapshot = parsed.tenants;
       }
+      const paypal = parsed.paypalState;
+      if (paypal && typeof paypal.appFingerprint === 'string' &&
+          [paypal.orders, paypal.invoices, paypal.vaultTokens, paypal.subscriptions, paypal.webhooks].every(Array.isArray)) {
+        this.paypalState = paypal;
+      }
     } catch {
       // Unreadable vault initializes cleanly
     }
@@ -511,6 +544,7 @@ export class AegisMultiTenantStore {
       users: Array.from(this.usersByEmail.values()),
       revokedTokenHashes: Array.from(this.revokedTokenHashes).slice(-2000),
       tenants: this.persistedTenantsSnapshot,
+      paypalState: this.readPayPalState?.() ?? this.paypalState,
     };
   }
 
@@ -560,6 +594,14 @@ export class AegisMultiTenantStore {
     }
   }
 
+  public getPayPalState(): PayPalGatewaySnapshot | undefined {
+    return this.paypalState;
+  }
+
+  public setPayPalStateSource(read: () => PayPalGatewaySnapshot): void {
+    this.readPayPalState = read;
+  }
+
   public getUserByEmail(email: string): StoredUserRecord | undefined {
     return this.usersByEmail.get(email.trim().toLowerCase());
   }
@@ -574,7 +616,7 @@ export class AegisMultiTenantStore {
     const normalizedEmail = params.email.trim().toLowerCase();
     const now = new Date().toISOString();
     const record: StoredUserRecord = {
-      id: `OP-${sha256Hex(normalizedEmail).slice(0, 8).toUpperCase()}`,
+      id: `OP-${crypto.randomBytes(16).toString('hex')}`,
       email: normalizedEmail,
       fullName: params.fullName.trim() || 'Workspace Operator',
       organization: params.organization.trim() || 'PayPal Workspace',
@@ -642,7 +684,7 @@ export class AegisMultiTenantStore {
       return existing;
     }
     const record: StoredUserRecord = {
-      id: `OP-${sha256Hex(normalizedEmail).slice(0, 8).toUpperCase()}`,
+      id: `OP-${crypto.randomBytes(16).toString('hex')}`,
       email: normalizedEmail,
       fullName: params.fullName,
       organization: params.organization,
@@ -736,7 +778,7 @@ export class AegisMultiTenantStore {
 
   public getStorageArchitectureSummary(activeTenantId?: string) {
     const displayPath =
-      this.storageMode === 'LOCAL_ENCRYPTED_FS_VAULT'
+      this.storageMode === 'LOCAL_PERMISSION_RESTRICTED_FS_VAULT'
         ? 'data/aegispay_store.json (0o600 Async Atomic Write-Ahead Vault, Git-Ignored)'
         : this.storageMode === 'SERVERLESS_STATELESS_HMAC_WITH_TMP_CACHE'
           ? 'Stateless HMAC-SHA256 Identity + Per-Instance /tmp Ephemeral Cache (External KV Hook Ready)'

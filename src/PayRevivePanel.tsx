@@ -66,6 +66,7 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
     presets[0]?.presetId || 'PAYDAY_LIQUIDITY'
   );
   const [form, setForm] = useState<FailedPaymentEvent>(defaultPreset);
+  const [actionError, setActionError] = useState('');
   const [busyRecover, setBusyRecover] = useState(false);
   const [busyBench, setBusyBench] = useState(false);
 
@@ -83,6 +84,7 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
   };
 
   const handleRunRecovery = async () => {
+    setActionError('');
     setBusyRecover(true);
     try {
       const res = await apiFetch('/api/payrevive/recover', {
@@ -92,28 +94,35 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
           executeLivePayPal: true,
         }),
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
       if (res.ok) {
-        const data = await res.json();
         setResult(data);
         await onRefreshState();
       }
+    } catch (err) {
+      setActionError((err as Error).message);
     } finally {
       setBusyRecover(false);
     }
   };
 
   const handleRunBenchmark = async () => {
+    setActionError('');
     setBusyBench(true);
     try {
       const res = await apiFetch('/api/payrevive/benchmark', {
         method: 'POST',
         body: JSON.stringify({ batches: 500, batchSize: 20, seed: 20261028 }),
       });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
       if (res.ok) {
-        const data = await res.json();
         setBenchmark(data.report);
         await onRefreshState();
       }
+    } catch (err) {
+      setActionError((err as Error).message);
     } finally {
       setBusyBench(false);
     }
@@ -148,22 +157,24 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
 
   return (
     <div className="space-y-5 animate-view-enter">
+      {actionError && <p role="alert" className="p-3 border border-red-500/60 bg-red-950/40 text-sm text-red-200">{actionError}</p>}
+      <p className="text-xs text-slate-300">Research prototype trained and evaluated on synthetic payment data. Benchmark gains describe this simulator, not observed merchant revenue or production performance.</p>
       {/* Symmetrical 4-Card Summary Strip */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <div className="glass-brutal-panel p-4 corner-ticks flex flex-col justify-between min-h-[96px]">
           <div className="flex items-center justify-between">
             <span className="font-mono text-[10px] uppercase tracking-widest text-[#94A3B8]">
-              500-Batch Net Lift
+              Synthetic Net Lift
             </span>
             <span className="px-1.5 py-0.5 bg-[#CCFF00]/15 border border-[#CCFF00]/40 font-mono text-[10px] font-bold text-[#CCFF00]">
-              MEASURED
+              SIMULATED
             </span>
           </div>
           <div className="flex items-baseline justify-between mt-2">
             <span className="font-display text-2xl font-bold text-[#CCFF00] tabular-nums">
-              +{benchmark ? benchmark.netRecoveryLiftPercent.toFixed(1) : '66.4'}%
+              {benchmark ? `+${benchmark.netRecoveryLiftPercent.toFixed(1)}%` : 'Not run'}
             </span>
-            <span className="font-mono text-[11px] text-[#94A3B8]">vs static rules</span>
+            <span className="font-mono text-[11px] text-[#94A3B8]">vs simulated rules</span>
           </div>
         </div>
 
@@ -176,10 +187,9 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
           </div>
           <div className="flex items-baseline justify-between mt-2">
             <span className="font-display text-2xl font-bold text-[#F8FAFC] tabular-nums">
-              {benchmark ? benchmark.payRevive.complianceViolations : 0} /{' '}
-              {benchmark ? benchmark.totalFailedPaymentsEvaluated.toLocaleString() : '10,000'}
+              {benchmark ? `${benchmark.payRevive.complianceViolations} / ${benchmark.totalFailedPaymentsEvaluated.toLocaleString()}` : 'Not run'}
             </span>
-            <span className="font-mono text-[11px] text-[#CCFF00]">ZERO REFUSALS</span>
+            <span className="font-mono text-[11px] text-[#CCFF00]">SYNTHETIC CASES</span>
           </div>
         </div>
 
@@ -192,9 +202,9 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
           </div>
           <div className="flex items-baseline justify-between mt-2">
             <span className="font-display text-xl font-bold text-[#F8FAFC]">
-              XGBoost + TreeSHAP
+              Newton GBDT + TreeSHAP
             </span>
-            <span className="font-mono text-[11px] text-[#0047FF]">12 TREES</span>
+            <span className="font-mono text-[11px] text-[#0047FF]">16 TREES</span>
           </div>
         </div>
 
@@ -263,7 +273,7 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
                 <label className="block font-mono text-[10px] uppercase text-[#94A3B8] mb-1">
                   Amount (USD)
                 </label>
-                <input
+                <input aria-label="Failed payment amount in USD"
                   type="number"
                   step="0.01"
                   value={(form.amountCents / 100).toFixed(2)}
@@ -281,7 +291,7 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
                 <label className="block font-mono text-[10px] uppercase text-[#94A3B8] mb-1">
                   Decline Code
                 </label>
-                <select
+                <select aria-label="Gateway decline code"
                   value={form.declineCode}
                   onChange={(e) =>
                     setForm({ ...form, declineCode: e.target.value as PaymentDeclineCode })
@@ -301,7 +311,7 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
                 <label className="block font-mono text-[10px] uppercase text-[#94A3B8] mb-1">
                   Days to Payday
                 </label>
-                <input
+                <input aria-label="Days until payday"
                   type="number"
                   min={0}
                   max={14}
@@ -317,7 +327,7 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
                 <label className="block font-mono text-[10px] uppercase text-[#94A3B8] mb-1">
                   30d Prior Retries
                 </label>
-                <input
+                <input aria-label="Prior retries in 30 days"
                   type="number"
                   min={0}
                   max={6}
@@ -333,7 +343,7 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
                 <label className="block font-mono text-[10px] uppercase text-[#94A3B8] mb-1">
                   Capture Rate (%)
                 </label>
-                <input
+                <input aria-label="Historical capture rate percentage"
                   type="number"
                   min={0}
                   max={100}
@@ -355,7 +365,7 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
                 <label className="block font-mono text-[10px] uppercase text-[#94A3B8] mb-1">
                   Local Hour (0-23)
                 </label>
-                <input
+                <input aria-label="Customer local hour"
                   type="number"
                   min={0}
                   max={23}
@@ -478,7 +488,7 @@ export const PayRevivePanel: React.FC<PayRevivePanelProps> = ({
                   Select a failure preset and click Diagnose &amp; Recover
                 </div>
                 <p className="text-xs text-[#94A3B8] max-w-md mx-auto">
-                  Computes exact 12-tree XGBoost Shapley attributions, evaluates Net Expected Value
+                  Computes exact 16-tree Newton GBDT Shapley attributions, evaluates Net Expected Value
                   across 6 PayPal recovery arms, and enforces hard compliance rules.
                 </p>
               </div>

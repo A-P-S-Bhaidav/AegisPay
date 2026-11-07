@@ -16,7 +16,10 @@
     "test:watch": "vitest",
     "train:payrevive": "tsx scripts/train-payrevive-gbdt.ts",
     "benchmark:payrevive": "tsx scripts/benchmark-payrevive.ts",
-    "mcp": "node mcp-server/index.mjs"
+    "mcp": "node mcp-server/index.mjs",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test && npm run build",
+    "verify:providers": "tsx scripts/verify-providers.ts"
   },
   "dependencies": {
     "ag-grid-community": "^33.1.1",
@@ -43,6 +46,9 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vite": "^6.1.0",
-    "vitest": "^3.0.5"
+    "vitest": "^5.1.0"
+  },
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0 || >=26.0.0"
   }
 }
