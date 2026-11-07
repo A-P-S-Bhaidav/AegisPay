@@ -985,7 +985,7 @@ Return JSON: { "maxSingleUsd": number|null, "autoAllowUsd": number|null, "minCon
     trueFreeCashflowCents: number;
     postPurchaseFreeCashflowCents: number;
     verdict: DecisionVerdict;
-  }): Promise<{ advisorNote: string; telemetry: AiExecutionTelemetry }> {
+  }): Promise<{ advisorNote: string; summary: string; telemetry: AiExecutionTelemetry }> {
     const { data, telemetry } = await this.callAiWithGroqFailover<{ advisorNote: string }>(
       `You are a clear, supportive personal & business cashflow advisor. Explain the deterministic affordability result in 2 plain-English sentences using ONLY the exact dollar amounts given. Return JSON: { "advisorNote": string }`,
       `Item: "${params.itemTitle}" ($${(params.proposedSpendCents / 100).toFixed(2)})
@@ -994,10 +994,13 @@ Remaining After Purchase: $${(params.postPurchaseFreeCashflowCents / 100).toFixe
 Deterministic Verdict: ${params.verdict}`
     );
 
+    const advisorNote =
+      data?.advisorNote ||
+      `Based on your upcoming rent, loans, and safety buffer, your unallocated cashflow is $${(params.trueFreeCashflowCents / 100).toFixed(2)}, making this purchase a ${params.verdict} decision.`;
+
     return {
-      advisorNote:
-        data?.advisorNote ||
-        `Based on your upcoming rent, loans, and safety buffer, your unallocated cashflow is $${(params.trueFreeCashflowCents / 100).toFixed(2)}, making this purchase a ${params.verdict} decision.`,
+      advisorNote,
+      summary: advisorNote,
       telemetry,
     };
   }

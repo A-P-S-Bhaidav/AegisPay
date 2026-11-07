@@ -824,10 +824,19 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
                   </span>
                 )}
               </div>
-              {refundResult.vision && (
+              {(refundResult.vision || refundResult.visionTelemetry) && (
                 <div className="text-[11px] font-mono text-sky-300">
-                  Vision Telemetry: {refundResult.vision.detectedItem} • Severity:{' '}
-                  {refundResult.vision.severity} ({Math.round((refundResult.vision.confidence || 0.92) * 100)}% conf)
+                  Vision Telemetry:{' '}
+                  {refundResult.vision?.detectedItem ||
+                    refundResult.visionTelemetry?.detectedItemCategory}{' '}
+                  • Severity:{' '}
+                  {refundResult.vision?.severity || refundResult.visionTelemetry?.severityTier} (
+                  {Math.round(
+                    ((refundResult.vision?.confidence ??
+                      refundResult.visionTelemetry?.photoAuthenticityConfidence) ||
+                      0.92) * 100
+                  )}
+                  % conf)
                 </div>
               )}
               <p className="text-slate-300 leading-relaxed">

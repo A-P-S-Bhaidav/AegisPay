@@ -1280,6 +1280,86 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
     }
   });
 
+  it('verifies frontend-backend payload & response contracts for Cashflow Editor, ClipRefund Policy Override, DealForge Transcript, and Route Aliases', async () => {
+    // 1. Cashflow Profile Editor payload & response
+    const cfRes = await fetch(`${baseUrl}/api/lupa/cashflow-update`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        currentCheckingBalanceCents: 495000,
+        minimumSafetyBufferCents: 115000,
+        commitments: [
+          {
+            id: 'cf_test_rent',
+            name: 'Studio Loft Rent',
+            amountCents: 185000,
+            dueInDays: 5,
+            category: 'RENT_MORTGAGE',
+            mandatory: true,
+          },
+        ],
+      }),
+    });
+    expect(cfRes.status).toBe(200);
+    const cfData = await cfRes.json();
+    expect(cfData.currentCheckingBalanceCents).toBe(495000);
+    expect(cfData.minimumSafetyBufferCents).toBe(115000);
+    expect(Array.isArray(cfData.commitments)).toBe(true);
+    expect(cfData.commitments[0].name).toBe('Studio Loft Rent');
+
+    // 2. ClipRefund policyOverride & vision object
+    const clipRes = await fetch(`${baseUrl}/api/cliprefund/evaluate-and-refund`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        presetId: 'MUG_RIM_CHIP',
+        itemTitle: 'Stoneware Mug',
+        originalOrderCents: 3200,
+        customerNote: 'Small rim chip on arrival',
+        policyOverride: {
+          minorCosmeticRefundPct: 22,
+          moderateFunctionalRefundPct: 35,
+          maxPartialRefundCapPct: 45,
+        },
+      }),
+    });
+    expect(clipRes.status).toBe(200);
+    const clipData = await clipRes.json();
+    expect(clipData.vision).toBeDefined();
+    expect(typeof clipData.vision.detectedItem).toBe('string');
+    expect(typeof clipData.vision.severity).toBe('string');
+    expect(clipData.calculation.appliedPercentage).toBe(22);
+
+    // 3. DealForge rounds[].speaker, rounds[].message, contract.contractHash, contract.agreedTerms.revisionsIncluded
+    const dealRes = await fetch(`${baseUrl}/api/dealforge/negotiate`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        naturalDescription:
+          'Sentinel Security quoted $980 (floor $640) for Cloud Penetration Test; our target is $650 and max budget is $820.',
+      }),
+    });
+    expect(dealRes.status).toBe(200);
+    const dealData = await dealRes.json();
+    expect(dealData.dealReached).toBe(true);
+    expect(dealData.contract.contractHash).toBe(dealData.contract.contractSha256);
+    expect(dealData.contract.agreedTerms.revisionsIncluded).toBe(
+      dealData.contract.agreedTerms.revisions
+    );
+    expect(dealData.rounds[0].speaker).toBe(dealData.rounds[0].proposer);
+    expect(typeof dealData.rounds[0].message).toBe('string');
+
+    // 4. Route aliases (/api/lupa/vault/setup-token)
+    const vaultAliasRes = await fetch(`${baseUrl}/api/lupa/vault/setup-token`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ agentName: 'Alias Test Agent', maxSingleCents: 9500 }),
+    });
+    expect(vaultAliasRes.status).toBe(200);
+    const vaultAliasData = await vaultAliasRes.json();
+    expect(vaultAliasData.vaultToken.setupTokenId).toBeDefined();
+  });
+
   const stressSteps = Array.from({ length: 40 }, (_, idx) => idx + 1);
   it.each(stressSteps)(
     'API deterministic concurrency invariant check #%i',
@@ -1298,5 +1378,6 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
     }
   );
 });
+
 
 

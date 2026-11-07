@@ -743,10 +743,16 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                       <strong>{fmtUsd(dealResult.contract.upfrontDepositCents)}</strong> • Remaining
                       on completion: {fmtUsd(dealResult.contract.escrowCompletionCents)} •{' '}
                       {dealResult.contract.agreedTerms.deliveryDays} days •{' '}
-                      {dealResult.contract.agreedTerms.revisionsIncluded} revisions
+                      {dealResult.contract.agreedTerms.revisions ??
+                        dealResult.contract.agreedTerms.revisionsIncluded}{' '}
+                      revisions
                     </div>
                     <div className="font-mono text-[11px] text-[#CCFF00]">
-                      Contract SHA-256: {String(dealResult.contract.contractHash).slice(0, 28)}...
+                      Contract SHA-256:{' '}
+                      {String(
+                        dealResult.contract.contractSha256 || dealResult.contract.contractHash || ''
+                      ).slice(0, 28)}
+                      ...
                     </div>
                   </div>
                   {(dealResult.paypalInvoice?.payerViewUrl ||
@@ -780,13 +786,15 @@ export const GetPaidView: React.FC<GetPaidViewProps> = ({ state, onRefresh }) =>
                         >
                           <div className="flex items-center justify-between font-mono text-[10px]">
                             <span className="text-[#CCFF00]">
-                              Round {r.round} • {r.speaker}
+                              Round {r.round} • {r.proposer || r.speaker}
                             </span>
                             <span className="text-white font-bold">
                               {fmtUsd(r.proposedTerms.priceCents)}
                             </span>
                           </div>
-                          <p className="text-[11px] text-slate-300 line-clamp-3">{r.message}</p>
+                          <p className="text-[11px] text-slate-300 line-clamp-3">
+                            {r.sanitizedMessage || r.message}
+                          </p>
                         </div>
                       ))}
                     </div>

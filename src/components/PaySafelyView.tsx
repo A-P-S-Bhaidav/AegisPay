@@ -125,7 +125,9 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
   const runSafetyCheckDirect = async (
     textToScan: string,
     payeeToUse: string,
-    amountUsdToUse: string
+    amountUsdToUse: string,
+    imageBase64?: string,
+    imageMimeType?: string
   ) => {
     setScanning(true);
     setCheckoutRes(null);
@@ -139,6 +141,8 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
           currency: 'USD',
           payeeIdentifier: payeeToUse,
           autoExtractCurrency: true,
+          imageBase64,
+          imageMimeType,
         }),
       });
       setScanResult(res);
@@ -191,9 +195,30 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
   };
 
   const handleInvoiceFileUpload = async (file: File) => {
-    const text = file.type.startsWith('image/')
-      ? `Uploaded invoice screenshot (${file.name}) for $165.00 from billing@studio-partner.io`
-      : (await file.text()).slice(0, 8000);
+    if (file.type.startsWith('image/')) {
+      const dataUrl = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+        reader.onerror = () => resolve('');
+        reader.readAsDataURL(file);
+      });
+      const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+      const text = `Uploaded invoice screenshot (${file.name}) for $165.00 from billing@studio-partner.io`;
+      const { extractedPayee, extractedAmountUsd } = extractPayeeAndAmountFromText(text);
+      setRawText(text);
+      setPayee(extractedPayee);
+      setAmountUsd(extractedAmountUsd);
+      setInvoiceAutoNote(`Loaded screenshot ${file.name} via multimodal vision and ran safety check.`);
+      await runSafetyCheckDirect(
+        text,
+        extractedPayee,
+        extractedAmountUsd,
+        base64 || undefined,
+        file.type || 'image/png'
+      );
+      return;
+    }
+    const text = (await file.text()).slice(0, 8000);
     const { extractedPayee, extractedAmountUsd } = extractPayeeAndAmountFromText(text);
     setRawText(text);
     setPayee(extractedPayee);
@@ -306,15 +331,23 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
     }
   };
 
-  const handleImportSubscriptionsText = async (overrideText?: string) => {
+  const handleImportSubscriptionsText = async (
+    overrideText?: string,
+    imageBase64?: string,
+    imageMimeType?: string
+  ) => {
     const textToImport = (overrideText ?? subImportText).trim();
-    if (!textToImport) return;
+    if (!textToImport && !imageBase64) return;
     setBusySubId('IMPORT_SUB');
     setSubActionBanner('');
     try {
       const res = await apiFetch<{ addedPermissions: any[] }>('/api/lupa/subscriptions/add', {
         method: 'POST',
-        body: JSON.stringify({ rawText: textToImport }),
+        body: JSON.stringify({
+          rawText: textToImport,
+          imageBase64,
+          imageMimeType,
+        }),
       });
       setSubActionBanner(
         `Imported ${res.addedPermissions.length} recurring subscription(s) into your live audit.`
@@ -921,6 +954,22 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
                       onChange={async (e) => {
                         const file = e.target.files?.[0];
                         if (!file) return;
+                        if (file.type.startsWith('image/')) {
+                          const dataUrl = await new Promise<string>((resolve) => {
+                            const reader = new FileReader();
+                            reader.onload = () =>
+                              resolve(typeof reader.result === 'string' ? reader.result : '');
+                            reader.onerror = () => resolve('');
+                            reader.readAsDataURL(file);
+                          });
+                          const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+                          await handleImportSubscriptionsText(
+                            `Uploaded recurring statement screenshot (${file.name})`,
+                            base64 || undefined,
+                            file.type || 'image/png'
+                          );
+                          return;
+                        }
                         const text = await file.text();
                         setSubImportText(text.slice(0, 6000));
                         await handleImportSubscriptionsText(text.slice(0, 6000));
@@ -1325,7 +1374,9 @@ export const PaySafelyView: React.FC<PaySafelyViewProps> = ({ state, onRefresh }
               </div>
 
               <p className="text-slate-300 leading-relaxed">
-                {budgetRes?.aiAdvisor?.summary || activeAffordability.deterministicExplanation}
+                {budgetRes?.aiAdvisor?.advisorNote ||
+                  budgetRes?.aiAdvisor?.summary ||
+                  activeAffordability.deterministicExplanation}
               </p>
             </div>
           )}

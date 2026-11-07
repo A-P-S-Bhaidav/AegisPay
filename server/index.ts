@@ -2425,16 +2425,49 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
   app.post('/api/lupa/cashflow-update', (req, res) => {
     const ws = getWorkspace(req);
-    const { balanceCents, safetyBufferCents, addCommitment, removeCommitmentId } = req.body || {};
-    if (typeof balanceCents === 'number' && Number.isFinite(balanceCents) && balanceCents >= 0) {
-      ws.currentCheckingBalanceCents = Math.round(balanceCents);
+    const {
+      balanceCents,
+      currentCheckingBalanceCents,
+      safetyBufferCents,
+      minimumSafetyBufferCents,
+      commitments,
+      addCommitment,
+      removeCommitmentId,
+    } = req.body || {};
+    const nextBalance =
+      typeof currentCheckingBalanceCents === 'number'
+        ? currentCheckingBalanceCents
+        : balanceCents;
+    const nextBuffer =
+      typeof minimumSafetyBufferCents === 'number'
+        ? minimumSafetyBufferCents
+        : safetyBufferCents;
+
+    if (typeof nextBalance === 'number' && Number.isFinite(nextBalance) && nextBalance >= 0) {
+      ws.currentCheckingBalanceCents = Math.round(nextBalance);
     }
-    if (
-      typeof safetyBufferCents === 'number' &&
-      Number.isFinite(safetyBufferCents) &&
-      safetyBufferCents >= 0
-    ) {
-      ws.minimumSafetyBufferCents = Math.round(safetyBufferCents);
+    if (typeof nextBuffer === 'number' && Number.isFinite(nextBuffer) && nextBuffer >= 0) {
+      ws.minimumSafetyBufferCents = Math.round(nextBuffer);
+    }
+    if (Array.isArray(commitments)) {
+      ws.cashflowCommitments = commitments
+        .filter((c) => c && typeof c === 'object' && String(c.name || '').trim())
+        .map((c, idx) => ({
+          id: String(c.id || `cf_${Date.now().toString(36)}_${idx}`),
+          name: String(c.name).slice(0, 80),
+          amountCents: Math.max(0, Math.round(Number(c.amountCents) || 0)),
+          dueInDays: Math.max(1, Math.min(90, Math.round(Number(c.dueInDays) || 7))),
+          category: [
+            'RENT_MORTGAGE',
+            'LOAN_INSTALLMENT',
+            'ESSENTIAL_LIVING',
+            'PAYPAL_AUTOPAY',
+            'SAVINGS_GOAL',
+          ].includes(c.category)
+            ? c.category
+            : 'ESSENTIAL_LIVING',
+          mandatory: c.mandatory !== undefined ? Boolean(c.mandatory) : c.category !== 'SAVINGS_GOAL',
+        }));
     }
     if (addCommitment && typeof addCommitment === 'object' && addCommitment.name) {
       ws.cashflowCommitments.push({
@@ -2464,6 +2497,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       currentCheckingBalanceCents: ws.currentCheckingBalanceCents,
       minimumSafetyBufferCents: ws.minimumSafetyBufferCents,
       cashflowCommitments: ws.cashflowCommitments,
+      commitments: ws.cashflowCommitments,
       defaultAffordability: updatedAffordability,
     });
   });
@@ -2586,7 +2620,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     res.json({ permit: target });
   });
 
-  app.post('/api/lupa/mint-vault-permit', async (req, res) => {
+  const handleMintVaultPermit = async (req: Request, res: Response) => {
     try {
       const ws = getWorkspace(req);
       const { agentName, maxSingleCents } = req.body || {};
@@ -2612,7 +2646,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     } catch (err) {
       res.status(400).json({ error: redactSecrets((err as Error).message) });
     }
-  });
+  };
+  app.post('/api/lupa/mint-vault-permit', handleMintVaultPermit);
+  app.post('/api/lupa/vault/setup-token', handleMintVaultPermit);
 
   app.post('/api/lupa/create-sandbox-subscription', async (req, res) => {
     try {
@@ -3049,7 +3085,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     }
   });
 
-  app.post('/api/lupa/resolve-hold', async (req, res) => {
+  const handleResolveHold = async (req: Request, res: Response) => {
     try {
       const ws = getWorkspace(req);
       const { orderId, action, operatorNote, fallbackAmountCents, fallbackMerchantName } =
@@ -3082,7 +3118,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     } catch (err) {
       res.status(400).json({ error: redactSecrets((err as Error).message) });
     }
-  });
+  };
+  app.post('/api/lupa/resolve-hold', handleResolveHold);
+  app.post('/api/lupa/resolve-held-order', handleResolveHold);
 
   // ==========================================================================
   // 5. PAYMENT SAFETY SCANNER & VERIFIED PAYPAL CHECKOUT
@@ -3199,7 +3237,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     }
   });
 
-  app.post('/api/scamshield/create-paypal-order', async (req, res) => {
+  const handleCreateScamShieldOrder = async (req: Request, res: Response) => {
     try {
       const ws = getWorkspace(req);
       const { signedToken } = req.body || {};
@@ -3229,7 +3267,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     } catch (err) {
       res.status(400).json({ error: redactSecrets((err as Error).message) });
     }
-  });
+  };
+  app.post('/api/scamshield/create-paypal-order', handleCreateScamShieldOrder);
+  app.post('/api/scamshield/create-order', handleCreateScamShieldOrder);
 
   app.post('/api/scamshield/capture-paypal-order', async (req, res) => {
     try {
@@ -3688,8 +3728,19 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         parsedNaturalInput,
         buyerMandate,
         sellerMandate,
-        rounds,
-        contract,
+        rounds: rounds.map((r) => ({
+          ...r,
+          speaker: r.proposer,
+          message: r.sanitizedMessage,
+        })),
+        contract: {
+          ...contract,
+          contractHash: contract.contractSha256,
+          agreedTerms: {
+            ...contract.agreedTerms,
+            revisionsIncluded: contract.agreedTerms.revisions,
+          },
+        },
         contractIntegrityVerified: verifyContractIntegrity(contract),
         zopaAnalysis: {
           exists: true,
@@ -3782,6 +3833,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         imageMimeType,
         simulateReplayAttack,
         merchantPolicyOverride,
+        policyOverride,
       } = req.body || {};
 
       let parsedNaturalInput: Awaited<
@@ -3806,7 +3858,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const effectivePresetId =
         parsedNaturalInput && !presetId ? undefined : presetId ? String(presetId) : undefined;
 
-      const targetOrderId = String(orderId || 'PAYPAL-SBX-8F92A1C4E7B01');
+      const targetOrderId = orderId
+        ? String(orderId)
+        : `PAYPAL-SBX-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
       const existingOrder = paypalGateway.getOrder(targetOrderId, ws.tenantId);
       const targetCaptureId =
         existingOrder?.captureId || `SIMCAP-${targetOrderId.replace('PAYPAL-SBX-', '')}`;
@@ -3831,12 +3885,34 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         imageMimeType: typeof imageMimeType === 'string' ? imageMimeType : undefined,
       });
 
-      const overrideTiers =
-        merchantPolicyOverride?.tierRefundPercentages ||
-        merchantPolicyOverride?.tierPercentages ||
-        {};
+      const incomingOverride = merchantPolicyOverride || policyOverride;
+      const overrideTiers: Partial<MerchantRefundPolicyMatrix['tierRefundPercentages']> = {
+        ...(incomingOverride?.tierRefundPercentages || incomingOverride?.tierPercentages || {}),
+      };
+      if (typeof incomingOverride?.minorCosmeticRefundPct === 'number') {
+        overrideTiers.COSMETIC_MINOR = Math.max(
+          5,
+          Math.min(75, Math.round(incomingOverride.minorCosmeticRefundPct))
+        );
+      }
+      if (typeof incomingOverride?.moderateFunctionalRefundPct === 'number') {
+        overrideTiers.COSMETIC_MODERATE = Math.max(
+          5,
+          Math.min(75, Math.round(incomingOverride.moderateFunctionalRefundPct))
+        );
+      }
+      if (typeof incomingOverride?.maxPartialRefundCapPct === 'number') {
+        const capPct = Math.max(10, Math.min(85, Math.round(incomingOverride.maxPartialRefundCapPct)));
+        overrideTiers.FUNCTIONAL_IMPAIRED = capPct;
+        if (overrideTiers.COSMETIC_MINOR && overrideTiers.COSMETIC_MINOR > capPct) {
+          overrideTiers.COSMETIC_MINOR = capPct;
+        }
+        if (overrideTiers.COSMETIC_MODERATE && overrideTiers.COSMETIC_MODERATE > capPct) {
+          overrideTiers.COSMETIC_MODERATE = capPct;
+        }
+      }
       const policyToUse: MerchantRefundPolicyMatrix =
-        merchantPolicyOverride && typeof merchantPolicyOverride === 'object'
+        incomingOverride && typeof incomingOverride === 'object'
           ? {
               ...ws.merchantPolicy,
               tierRefundPercentages: {
@@ -3904,6 +3980,11 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       res.json({
         parsedNaturalInput,
         visionTelemetry: visionResult.telemetry,
+        vision: {
+          detectedItem: visionResult.telemetry.detectedItemCategory,
+          severity: visionResult.telemetry.severityTier,
+          confidence: visionResult.telemetry.photoAuthenticityConfidence,
+        },
         visionEngineMode: visionResult.engineMode,
         failoverTelemetry: visionResult.failoverTelemetry,
         calculation,
