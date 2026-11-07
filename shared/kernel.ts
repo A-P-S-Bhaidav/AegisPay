@@ -629,7 +629,6 @@ export class ScamShieldTokenVault {
     currency: string;
     payeeIdentifier: string;
     nowMs?: number;
-    consume?: boolean;
   }): {
     allowed: boolean;
     errorCode?:
@@ -655,7 +654,7 @@ export class ScamShieldTokenVault {
     }
 
     const expectedSig = hmacSha256Hex(this.secret, signedToken.payload);
-    if (typeof signedToken.signature !== 'string' || expectedSig.length !== signedToken.signature.length || !crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(signedToken.signature))) {
+    if (expectedSig !== signedToken.signature) {
       return {
         allowed: false,
         errorCode: 'INVALID_SIGNATURE',
@@ -714,10 +713,8 @@ export class ScamShieldTokenVault {
     }
 
     // Consume single-use token atomically
-    if (params.consume !== false) {
-      this.consumedTokens.add(payload.tokenId);
-      this.boundOrders.set(orderId, payload.tokenId);
-    }
+    this.consumedTokens.add(payload.tokenId);
+    this.boundOrders.set(orderId, payload.tokenId);
 
     return {
       allowed: true,

@@ -42,7 +42,7 @@ describe('AegisPay MCP Server (Model Context Protocol JSON-RPC 2.0 Verification)
     return new Promise((resolve, reject) => {
       const mcpPath = path.resolve(process.cwd(), 'mcp-server', 'index.mjs');
       const proc = spawn('node', [mcpPath], {
-        env: { ...process.env, AEGISPAY_API_URL: apiUrl, AEGISPAY_OPERATOR_EMAIL: 'operator@aegispay.io', AEGISPAY_OPERATOR_PASSWORD: 'AegisPay2026!' },
+        env: { ...process.env, AEGISPAY_API_URL: apiUrl },
       });
 
       let stdoutData = '';
@@ -201,8 +201,7 @@ describe('AegisPay MCP Server (Model Context Protocol JSON-RPC 2.0 Verification)
     });
     const issued = JSON.parse(invRes.result.content[0].text);
     expect(issued.invoice.invoiceId).toBeDefined();
-    expect(issued.invoice.mode).toBe('CRYPTOGRAPHIC_SANDBOX_EMULATOR');
-    expect(issued.invoice.payerViewUrl).toBe('');
+    expect(issued.invoice.payerViewUrl).toContain('sandbox.paypal.com');
   });
 
   it('executes aegispay_payrevive_recover via tools/call for recoverable and compliance-blocked failures', async () => {

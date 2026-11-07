@@ -118,8 +118,6 @@ export interface PayReviveDecision {
   plainEnglishCause: string;
   plainEnglishRecommendation: string;
   settlementConfirmed: boolean;
-  paypalOrderId?: string;
-  paypalInvoiceId?: string;
 }
 
 // ----------------------------------------------------------------------------

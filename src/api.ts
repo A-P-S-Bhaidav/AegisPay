@@ -298,8 +298,6 @@ export interface WorkspaceState {
   };
   orders: Array<{
     orderId: string;
-    pillar?: string;
-    buyerCheckoutReady?: boolean;
     intent: string;
     status: string;
     paypalServerStatus: string;
@@ -360,8 +358,11 @@ export function fmtUsd(cents: number): string {
 
 export const formatUsd = fmtUsd;
 
+let activeMemorySessionToken = '';
+
 /**
- * Secure API helper: uses HttpOnly session cookies (`credentials: 'include'`)
+ * Secure API helper: uses HttpOnly session cookies (`credentials: 'include'`),
+ * maintains an in-memory Bearer token for zero-drop resilience across proxies/iframes,
  * and sends `X-Requested-With: AegisPay-Client` for CSRF defense.
  * Zero session tokens are ever written to `localStorage`!
  */
@@ -369,8 +370,15 @@ export async function apiFetch<T = any>(
   url: string,
   options: RequestInit = {}
 ): Promise<T> {
+  if (url === '/api/auth/logout') {
+    activeMemorySessionToken = '';
+  }
+
   const headers = new Headers(options.headers || {});
   headers.set('X-Requested-With', 'AegisPay-Client');
+  if (activeMemorySessionToken && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${activeMemorySessionToken}`);
+  }
   if (options.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
@@ -381,12 +389,12 @@ export async function apiFetch<T = any>(
     credentials: 'include',
   });
 
-  const data = await res.json().catch(() => {
-    if (res.ok) throw new Error('The server returned an unreadable response. Please try again.');
-    return {};
-  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data && typeof data === 'object' && typeof data.token === 'string' && data.token.startsWith('aegis_sess_')) {
+    activeMemorySessionToken = data.token;
+  }
+
   if (!res.ok) {
-    if (res.status === 401) window.dispatchEvent(new Event('aegispay:session-expired'));
     const err = new Error(data?.error || `Request failed (${res.status})`) as Error & {
       status?: number;
       data?: unknown;

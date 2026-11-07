@@ -54,12 +54,15 @@ function appendSetCookie(res: Response, cookieStr: string): void {
 }
 
 function isHttpsRequest(req: Request): boolean {
-  return (
-    process.env.NODE_ENV === 'production' ||
-    Boolean(process.env.VERCEL) ||
-    req.secure ||
-    req.headers['x-forwarded-proto'] === 'https'
-  );
+  const host = String(req.headers.host || '').toLowerCase();
+  if (host.startsWith('localhost') || host.startsWith('127.0.0.1') || host.startsWith('[::1]')) {
+    return false;
+  }
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  return Boolean(process.env.VERCEL) || Boolean(req.secure) || forwardedProto === 'https';
 }
 
 export function setSessionCookie(req: Request, res: Response, token: string): void {
@@ -67,7 +70,7 @@ export function setSessionCookie(req: Request, res: Response, token: string): vo
     `aegis_session=${encodeURIComponent(token)}`,
     'Path=/',
     'HttpOnly',
-    'SameSite=Strict',
+    'SameSite=Lax',
     'Max-Age=43200',
   ];
   if (isHttpsRequest(req)) {
@@ -79,7 +82,7 @@ export function setSessionCookie(req: Request, res: Response, token: string): vo
 export function clearSessionCookie(res: Response): void {
   appendSetCookie(
     res,
-    'aegis_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+    'aegis_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT'
   );
 }
 

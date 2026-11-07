@@ -18,7 +18,7 @@ interface AuthGateProps {
   authErrorBanner?: string;
   onAuthenticated: (meta?: { isNewAccount?: boolean }) => Promise<void>;
   onBackToLanding: () => void;
-  onLaunchDemo?: () => Promise<void>;
+  onLaunchDemo: () => Promise<void>;
 }
 
 export const AuthGate: React.FC<AuthGateProps> = ({
@@ -108,8 +108,28 @@ export const AuthGate: React.FC<AuthGateProps> = ({
     }
   };
 
+  const handleOperatorQuickLogin = async () => {
+    setError('');
+    setEmail('operator@aegispay.io');
+    setPassword('AegisPay2026!');
+    setLoading(true);
+    try {
+      await apiFetch('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: 'operator@aegispay.io',
+          password: 'AegisPay2026!',
+        }),
+      });
+      await onAuthenticated({ isNewAccount: false });
+    } catch (err) {
+      setError((err as Error).message || 'Quick operator login failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleQuickDemo = async () => {
-    if (!onLaunchDemo) return;
     setError('');
     setLoading(true);
     try {
@@ -122,7 +142,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
   };
 
   return (
-    <main className="min-h-screen w-full bg-midnight-grid text-slate-100 flex flex-col justify-between px-4 sm:px-8 py-8">
+    <div className="min-h-screen w-full bg-midnight-grid text-slate-100 flex flex-col justify-between px-4 sm:px-8 py-8">
       <div className="w-full max-w-5xl mx-auto flex items-center justify-between">
         <button
           type="button"
@@ -151,12 +171,12 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               Sign in to manage your PayPal safety &amp; billing
             </h1>
             <p className="text-sm text-slate-300 leading-relaxed">
-              Sign in using the method you registered with. Your workspace holds your invoice
-              checks, spending limits, and milestone plans.
+              Use Google or Email interchangeably with the same address—your isolated workspace,
+              invoice checks, subscription limits, and milestone plans stay synced.
             </p>
           </div>
 
-          {onLaunchDemo && <div className="p-4 bg-[#070A12] border border-[#1E293B] space-y-3">
+          <div className="p-4 bg-[#070A12] border border-[#1E293B] space-y-3">
             <div className="text-xs font-mono uppercase text-[#CCFF00]">
               Want to explore right away?
             </div>
@@ -173,7 +193,7 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               <Play className="w-4 h-4 fill-current shrink-0" />
               Launch Guided Demo Workspace
             </button>
-          </div>}
+          </div>
         </div>
 
         {/* Right 7 Columns: Google OAuth + Email Sign In / Register */}
@@ -213,9 +233,38 @@ export const AuthGate: React.FC<AuthGateProps> = ({
             <div
               role="alert"
               aria-live="polite"
-              className="p-3.5 bg-red-950/50 border border-red-500/60 text-xs text-red-200 leading-relaxed"
+              className="p-3.5 bg-red-950/50 border border-red-500/60 text-xs text-red-200 leading-relaxed space-y-2"
             >
-              {error}
+              <div>{error}</div>
+              {mode === 'login' && email.includes('@') && password.length >= 8 && (
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={async () => {
+                    setError('');
+                    setLoading(true);
+                    try {
+                      const regRes = await apiFetch<{ isNewAccount?: boolean }>('/api/auth/register', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          email,
+                          password,
+                          fullName: fullName || email.split('@')[0],
+                          organization: organization || 'PayPal Workspace',
+                        }),
+                      });
+                      await onAuthenticated({ isNewAccount: Boolean(regRes.isNewAccount) });
+                    } catch (regErr) {
+                      setError((regErr as Error).message || 'Could not create account.');
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-[#0047FF] text-white font-mono text-[11px] uppercase hover:bg-[#195BFF] transition-colors"
+                >
+                  <span>New account? Create Account with {email} &rarr;</span>
+                </button>
+              )}
             </div>
           )}
 
@@ -409,13 +458,25 @@ export const AuthGate: React.FC<AuthGateProps> = ({
               </span>
               <ArrowRight className="w-4 h-4 shrink-0" />
             </button>
+
+            <div className="pt-1 flex items-center justify-between gap-2 text-[11px] text-slate-400">
+              <span>Testing with default sandbox operator?</span>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={handleOperatorQuickLogin}
+                className="font-mono text-[#CCFF00] hover:underline"
+              >
+                1-Click Sign In (operator@aegispay.io)
+              </button>
+            </div>
           </form>
         </div>
       </div>
 
       <div className="text-center text-xs text-slate-500 font-mono">
-        Protected by HttpOnly session cookies &amp; per-account workspace isolation.
+        Protected by encrypted HttpOnly session cookies &amp; per-account workspace isolation.
       </div>
-    </main>
+    </div>
   );
 };

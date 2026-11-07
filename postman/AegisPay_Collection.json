@@ -1,394 +1,194 @@
 {
   "info": {
-    "_postman_id": "5b615dc9-3d79-4190-92ba-681ca768d3da",
-    "name": "AegisPay sandbox integration checks",
-    "description": "Use a private Postman environment for accountPassword. Set sandbox merchant/buyer identities. Run checkout requests individually; approve with a separate sandbox personal buyer before capture. No embedded shared credentials. Do not run against production money. Review and signing token expire; repeat review when needed. Benchmarks and safety fuzzers use synthetic TEST inputs only.",
+    "name": "AegisPay OS v3.0 - PayPal AI Hackathon Official API Collection",
+    "_postman_id": "f5c47e0c-3757-42a8-92c1-9f484d182926",
+    "description": "Zero-Trust Postman v2.1 API Collection for AegisPay OS v3.0 across Mandatory Auth, PayRevive Autonomous Revenue Recovery (XGBoost + TreeSHAP + Bandit + 500-Batch Benchmark), Smart Budget & Permits, Checkout Firewall, Deal Negotiator, Instant Photo Refund, Retention Copilot, and PayStream Studio.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
-  },
-  "auth": {
-    "type": "bearer",
-    "bearer": [
-      {
-        "key": "token",
-        "value": "{{authToken}}",
-        "type": "string"
-      }
-    ]
   },
   "variable": [
     {
       "key": "baseUrl",
-      "value": "http://localhost:8787"
-    },
-    {
-      "key": "accountEmail",
-      "value": ""
-    },
-    {
-      "key": "sandboxMerchantEmail",
-      "value": ""
-    },
-    {
-      "key": "sandboxBuyerEmail",
-      "value": ""
+      "value": "https://aegispay-orpin.vercel.app"
     },
     {
       "key": "authToken",
-      "value": ""
-    },
-    {
-      "key": "signedToken",
-      "value": ""
-    },
-    {
-      "key": "paypalOrderId",
       "value": ""
     }
   ],
   "item": [
     {
-      "name": "Health and actual provider configuration",
+      "name": "0. Public Security & Health Manifest",
       "request": {
         "method": "GET",
         "header": [],
-        "url": "{{baseUrl}}/api/health",
-        "auth": {
-          "type": "noauth"
-        }
+        "url": "{{baseUrl}}/api/health"
       }
     },
     {
-      "name": "Sign in with your account",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
-        ],
-        "url": "{{baseUrl}}/api/auth/login",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"email\": \"{{accountEmail}}\",\n  \"password\": \"{{accountPassword}}\"\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        },
-        "auth": {
-          "type": "noauth"
-        }
-      },
+      "name": "1. Mandatory Zero-Trust Login (Captures Bearer Token)",
       "event": [
         {
           "listen": "test",
           "script": {
-            "type": "text/javascript",
             "exec": [
-              "pm.test(\"Sign-in succeeded\", () => pm.response.to.have.status(200));",
-              "if (pm.response.code === 200) pm.collectionVariables.set(\"authToken\", pm.response.json().token);"
-            ]
+              "const json = pm.response.json();",
+              "if (json && json.token) { pm.collectionVariables.set('authToken', json.token); }"
+            ],
+            "type": "text/javascript"
           }
         }
-      ]
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"operator@aegispay.io\",\n  \"password\": \"AegisPay2026!\"\n}"
+        },
+        "url": "{{baseUrl}}/api/auth/login"
+      }
     },
     {
-      "name": "Tenant workspace",
+      "name": "2. Tenant Workspace & Live PayPal Sandbox Status",
       "request": {
         "method": "GET",
-        "header": [],
+        "header": [{ "key": "Authorization", "value": "Bearer {{authToken}}" }],
         "url": "{{baseUrl}}/api/state"
       }
     },
     {
-      "name": "Review payment request",
+      "name": "3. PayRevive - XGBoost + TreeSHAP + Bandit Failed-Payment Recovery",
       "request": {
         "method": "POST",
         "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{authToken}}" }
         ],
-        "url": "{{baseUrl}}/api/scamshield/review",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"rawText\": \"Invoice for completed design work: $1.00 USD via PayPal Goods and Services.\",\n  \"claimedAmountCents\": 100,\n  \"currency\": \"USD\",\n  \"payeeIdentifier\": \"{{sandboxMerchantEmail}}\"\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test(\"Review succeeded\", () => pm.response.to.have.status(200));",
-              "const data = pm.response.json();",
-              "if(data.signedToken) pm.collectionVariables.set(\"signedToken\", JSON.stringify(data.signedToken));"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Create reviewed PayPal sandbox order",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
-        ],
-        "url": "{{baseUrl}}/api/scamshield/create-paypal-order",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"signedToken\": {{signedToken}}\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
-      },
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test(\"Order creation succeeded\", () => pm.response.to.have.status(200));",
-              "if(pm.response.code===200) pm.collectionVariables.set(\"paypalOrderId\",pm.response.json().orderId);"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Capture AFTER sandbox buyer approval",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
-        ],
-        "url": "{{baseUrl}}/api/scamshield/capture-paypal-order",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"orderId\": \"{{paypalOrderId}}\",\n  \"signedToken\": {{signedToken}}\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
+          "raw": "{\n  \"presetId\": \"EXPIRED_CARD_WALLET_SWITCH\"\n}"
+        },
+        "url": "{{baseUrl}}/api/payrevive/recover"
       }
     },
     {
-      "name": "HTTP MCP initialize",
+      "name": "4. PayRevive - 500-Batch Monte Carlo Simulation Benchmark",
       "request": {
         "method": "POST",
         "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{authToken}}" }
         ],
-        "url": "{{baseUrl}}/api/mcp",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"initialize\",\n  \"params\": {}\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
+          "raw": "{\n  \"batches\": 500,\n  \"batchSize\": 20,\n  \"seed\": 20261028\n}"
+        },
+        "url": "{{baseUrl}}/api/payrevive/benchmark"
       }
     },
     {
-      "name": "HTTP MCP list tools",
+      "name": "5. Smart Budget & Permits - Agent Payment Proposal",
       "request": {
         "method": "POST",
         "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{authToken}}" }
         ],
-        "url": "{{baseUrl}}/api/mcp",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 2,\n  \"method\": \"tools/list\",\n  \"params\": {}\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
+          "raw": "{\n  \"permitId\": \"PRM-CLAUDE-CODE-01\",\n  \"amountCents\": 4500,\n  \"merchantId\": \"merch_nordic_hardware\",\n  \"merchantName\": \"NordicLight Studio Hardware\",\n  \"category\": \"HARDWARE\",\n  \"itemDescription\": \"Minimalist LED Desk Lamp\",\n  \"aiConfidenceScore\": 0.68,\n  \"aiSuggestedVerdict\": \"ALLOW\"\n}"
+        },
+        "url": "{{baseUrl}}/api/lupa/agent-pay"
       }
     },
     {
-      "name": "HTTP MCP authenticated cashflow query",
+      "name": "6. Checkout Firewall - Pre-Payment Threat Scan & Single-Use Token",
       "request": {
         "method": "POST",
         "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{authToken}}" }
         ],
-        "url": "{{baseUrl}}/api/mcp",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 3,\n  \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"aegispay_check_cashflow\",\n    \"arguments\": {\n      \"itemTitle\": \"Proposed purchase\",\n      \"proposedSpendCents\": 100\n    }\n  }\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
+          "raw": "{\n  \"rawText\": \"Invoice #2049 for UI Design Milestone: $45.00 USD via PayPal Checkout.\",\n  \"claimedAmountCents\": 4500,\n  \"currency\": \"USD\",\n  \"payeeIdentifier\": \"billing@verified-studio.io\"\n}"
+        },
+        "url": "{{baseUrl}}/api/scamshield/review"
       }
     },
     {
-      "name": "Create milestone plan (does not send invoice)",
+      "name": "7. Deal Negotiator - Bilateral Mandates & Live PayPal Deposit Invoice",
       "request": {
         "method": "POST",
         "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{authToken}}" }
         ],
-        "url": "{{baseUrl}}/api/paystream/create-plan",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"projectTitle\": \"Sandbox design project\",\n  \"projectBrief\": \"Plan three milestones: discovery, implementation, and acceptance.\",\n  \"clientEmail\": \"{{sandboxBuyerEmail}}\",\n  \"totalBudgetCents\": 10001\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
+          "raw": "{\n  \"simulatePromptInjection\": true,\n  \"issueLiveInvoice\": true\n}"
+        },
+        "url": "{{baseUrl}}/api/dealforge/negotiate"
       }
     },
     {
-      "name": "Read-only subscription discovery",
+      "name": "8. Instant Photo Refund - Vision Defect Telemetry & Partial Refund",
       "request": {
         "method": "POST",
         "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{authToken}}" }
         ],
-        "url": "{{baseUrl}}/api/lupa/subscriptions/sync-paypal",
         "body": {
           "mode": "raw",
-          "raw": "{}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
+          "raw": "{\n  \"presetId\": \"chipped_ceramic_mug\",\n  \"originalOrderCents\": 2800,\n  \"itemTitle\": \"Handcrafted Stoneware Espresso Mug\"\n}"
+        },
+        "url": "{{baseUrl}}/api/cliprefund/evaluate-and-refund"
       }
     },
     {
-      "name": "Synthetic safety verifier (test fixtures only)",
+      "name": "9. Retention Copilot - Concession Ladder & Live Subscription",
       "request": {
         "method": "POST",
         "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{authToken}}" }
         ],
-        "url": "{{baseUrl}}/api/security/fuzz",
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"iterations\": 1000\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
+          "raw": "{\n  \"accountId\": \"ACC-SAAS-9042\",\n  \"customerName\": \"Jordan Vance\",\n  \"planName\": \"Aegis Cloud Pro Plan\",\n  \"currentPlanPriceCents\": 9900,\n  \"featureUtilizationPct\": 34,\n  \"negotiationStep\": 2,\n  \"customerMessage\": \"Our PayPal billing declined and $99/mo is too expensive right now.\"\n}"
+        },
+        "url": "{{baseUrl}}/api/churnrescue/intercept"
       }
     },
     {
-      "name": "Sign out",
+      "name": "10. PayStream Studio - Penny-Exact Smart Milestones & Invoice",
       "request": {
         "method": "POST",
         "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          },
-          {
-            "key": "X-Requested-With",
-            "value": "AegisPay-Client"
-          }
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{authToken}}" }
         ],
-        "url": "{{baseUrl}}/api/auth/logout",
         "body": {
           "mode": "raw",
-          "raw": "{}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
+          "raw": "{\n  \"projectTitle\": \"AI Commerce Checkout Portal\",\n  \"projectBrief\": \"Design UI, integrate PayPal Orders v2 & Invoicing v2, and deploy to production with automated tests.\",\n  \"clientEmail\": \"client-treasury@personal.example.com\",\n  \"totalBudgetCents\": 250000\n}"
+        },
+        "url": "{{baseUrl}}/api/paystream/create-plan"
+      }
+    },
+    {
+      "name": "11. Security Verifier - 1,000-Case Adversarial Property Fuzzer",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Authorization", "value": "Bearer {{authToken}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"iterations\": 1000\n}"
+        },
+        "url": "{{baseUrl}}/api/security/fuzz"
       }
     }
   ]

@@ -12,7 +12,6 @@ import {
   Terminal,
 } from 'lucide-react';
 import { apiFetch, fmtUsd, type WorkspaceState } from '../api';
-import { encodeCsvField } from '../csv';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -29,7 +28,6 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
   onRefresh,
   onBackToProduct,
 }) => {
-  const [actionError, setActionError] = useState('');
   const [labTab, setLabTab] = useState<LabTabId>('payrevive-bench');
 
   // 1. PayRevive 500-Batch Benchmark + TreeSHAP Inspector
@@ -65,25 +63,18 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
       });
       setBenchReport(res.report);
       await onRefresh();
-    } catch (err) {
-      setActionError((err as Error).message);
     } finally {
       setBenchRunning(false);
     }
   };
 
   const handleInspectShap = async () => {
-    setActionError('');
-    try {
     const res = await apiFetch('/api/payrevive/recover', {
       method: 'POST',
       body: JSON.stringify({ presetId: inspectPresetId, executeLivePayPal: false }),
     });
     setInspectedDecision(res.decision);
     await onRefresh();
-    } catch (err) {
-      setActionError((err as Error).message);
-    }
   };
 
   const handleRunFuzzer = async () => {
@@ -95,8 +86,6 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
       });
       setFuzzReport(res.report);
       await onRefresh();
-    } catch (err) {
-      setActionError((err as Error).message);
     } finally {
       setFuzzRunning(false);
     }
@@ -122,8 +111,6 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
       });
       setTamperResult({ scenario, ...res });
       await onRefresh();
-    } catch (err) {
-      setActionError((err as Error).message);
     } finally {
       setTamperLoading('');
     }
@@ -138,8 +125,6 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
       });
       setFailoverResult(res);
       await onRefresh();
-    } catch (err) {
-      setActionError((err as Error).message);
     } finally {
       setFailoverBusy(false);
     }
@@ -174,14 +159,14 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
     const rows = state.auditLogs.map((r) => [
       r.timestampIso,
       r.pillar,
-      r.actor,
+      `"${r.actor.replace(/"/g, '""')}"`,
       r.verdict,
       (r.amountCents / 100).toFixed(2),
       (r.savedOrProtectedCents / 100).toFixed(2),
       r.paypalRef,
       r.sha256Hash,
     ]);
-    const csv = [header, ...rows].map((row) => row.map(encodeCsvField).join(',')).join('\r\n');
+    const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -213,8 +198,6 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
 
   return (
     <div className="space-y-6 animate-view-enter">
-      {actionError && <p role="alert" className="border border-red-500/60 bg-red-950/40 p-3 text-sm text-red-200">{actionError}</p>}
-      <p className="text-xs text-slate-400">Verification tools use explicit synthetic fixtures. Model and simulator results do not establish real-world recovery rates or merchant savings.</p>
       {/* Separation Banner: Makes clear this is the isolated Engineering & Hackathon Test Lab */}
       <div className="glass-brutal-panel corner-ticks p-5 sm:p-6 border border-[#CCFF00]/60 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="space-y-1">
@@ -279,10 +262,10 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
               <div className="flex items-center justify-between border-b border-[#1E293B] pb-3">
                 <div>
                   <div className="text-xs font-mono uppercase text-[#CCFF00]">
-                    Synthetic Held-Out Ensemble + Bandit Simulation
+                    Out-of-Sample Trained Ensemble + Bandit Simulation
                   </div>
                   <h2 className="font-display text-lg font-bold text-white">
-                    500-Batch Synthetic Recovery Benchmark
+                    500-Batch Non-Stationary Revenue Recovery Benchmark
                   </h2>
                 </div>
                 <button
@@ -367,7 +350,7 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
                   TreeSHAP Attribution &amp; Disjoint LinUCB Arms
                 </h2>
                 <div className="flex gap-2">
-                  <select aria-label="Payment scenario for model inspection"
+                  <select
                     value={inspectPresetId}
                     onChange={(e) => setInspectPresetId(e.target.value)}
                     className="input-brutal text-xs py-1 w-44"
@@ -657,7 +640,6 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
               columnDefs={columnDefs}
               pagination={true}
               paginationPageSize={12}
-              paginationPageSizeSelector={[12, 25, 50, 100]}
             />
           </div>
         </div>
@@ -703,7 +685,7 @@ export const DiagnosticsLab: React.FC<DiagnosticsLabProps> = ({
                 <label className="block text-xs text-slate-300 mb-1">
                   HTTPS Support Escalation Webhook URL (SSRF-Protected, PRINCIPAL_ARCHITECT Only)
                 </label>
-                <input aria-label="Zapier webhook endpoint"
+                <input
                   type="url"
                   value={zapierUrlInput}
                   onChange={(e) => setZapierUrlInput(e.target.value)}

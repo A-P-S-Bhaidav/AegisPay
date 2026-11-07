@@ -8,11 +8,16 @@
     "contextMenus",
     "sidePanel",
     "scripting",
+    "tabs",
     "activeTab"
   ],
   "host_permissions": [
     "http://localhost:8787/*",
-    "https://aegispay-orpin.vercel.app/*"
+    "http://localhost:5173/*",
+    "https://aegispay-orpin.vercel.app/*",
+    "https://*.vercel.app/*",
+    "https://*.paypal.com/*",
+    "<all_urls>"
   ],
   "action": {
     "default_title": "Open AegisPay Agentic Side Panel"

@@ -1,26 +1,37 @@
-# AegisPay Chrome extension
+# Chrome Web Store Listing & Compliance - AegisPay Checkout Firewall
 
-The Manifest V3 extension reviews payment requests selected or entered in Chrome. It uses the same authenticated API and provider checks as the web application.
+**Last Updated:** 2026-10-28  
+**Extension Version:** 2.0.0  
+**Manifest Version:** 3  
 
-## Install for development
+## 1. Store Listing Copy
 
-1. Run `npm run build:extension` and extract `public/extension.zip`.
-2. In Chrome, open `chrome://extensions`, enable Developer mode, and choose **Load unpacked**. Select the extracted directory containing `manifest.json`.
-3. Open the AegisPay side panel. Choose the local or hosted endpoint and sign in with an existing email/password account on that endpoint.
-4. Enter or select invoice text, review the recipient and amount, then submit. A review that allows checkout can create an order for the configured PayPal sandbox merchant. Approve with a sandbox buyer and return to the panel to finish the payment.
-5. Sign out and remove the unpacked extension when testing is complete.
+- **Title:** AegisPay Pre-Payment Firewall & Agent Guard for PayPal
+- **Short Description (132 chars max):** Scan invoices, payment links, and checkout requests on any webpage before opening PayPal. Blocks scams and prompt injections.
+- **Detailed Description:**
+  Protect every online invoice and payment request before you pay. Highlight any payment message, freelancer invoice, or checkout text on any webpage, right-click **"Scan Payment Text with AegisPay"**, and view an instant threat analysis in your browser's Side Panel.
+  - **Pre-Payment Fraud & Prompt-Injection Detection:** Combines neural prompt-injection classification (`llama-prompt-guard-2-86m`), Gemini/Groq semantic reasoning, and 18 deterministic fraud rules before PayPal opens.
+  - **Single-Use Cryptographic Review Token:** Binds your reviewed amount, currency, and recipient to a one-time HMAC-SHA256 token so altered checkout amounts are blocked.
+  - **Automatic Cloud Failover:** Connects to your local AegisPay instance (`localhost:8787`) or automatically falls back to the hosted Vercel endpoint (`aegispay-orpin.vercel.app`).
+  - **Zero Background Tracking:** Only scans text you explicitly select or enter into the Side Panel.
 
-Google-only accounts cannot sign in through the current extension. Use a test email/password account. Start the local server before selecting the localhost endpoint.
+## 2. Permissions Justification
 
-## Permissions and data
+| Permission | Plain-English Justification for Chrome Web Store Review |
+| :--- | :--- |
+| `storage` | Saves the user's most recently selected payment text and recent scan history locally so the Side Panel can display them across sessions. |
+| `contextMenus` | Adds the right-click menu item "Scan Payment Text with AegisPay" when a user highlights text on a webpage. |
+| `sidePanel` | Opens the AegisPay verification interface in the browser Side Panel when the user clicks the extension icon or uses the context menu. |
+| `scripting` | Displays a brief visual confirmation banner on the active webpage when the user triggers a right-click payment scan. |
+| `tabs` | Reads the active tab's window ID and URL when the user initiates a context-menu scan so the Side Panel opens in the current window. |
+| `host_permissions` (`localhost`, `*.vercel.app`, `*.onrender.com`, `*.paypal.com`) | Connects to the AegisPay verification service to evaluate selected invoice text and issue single-use review tokens. |
 
-| Permission | Purpose |
-| --- | --- |
-| `activeTab`, `scripting` | Read text or show feedback in the current tab after a user action |
-| `contextMenus`, `sidePanel` | Open the review panel from the toolbar or a selection menu |
-| `storage` | Keep the endpoint setting and recent local selection/scan history. Keep authentication tokens in browser session storage |
-| Localhost and the named hosted API origin | Send sign-in requests and selected payment data to the endpoint chosen in the side panel |
+## 3. Privacy & Data Use Disclosure
 
-The extension sends selected payment text only after an explicit action and uses the chosen API endpoint. The endpoint may send supplied text to configured AI providers for semantic analysis. The extension stores recent selected text and scan history on the device. It clears the password field after sign-in and keeps no stored password. Restarting Chrome clears the session token. Avoid using confidential invoices when testing.
+- **Data Collection:** Only payment or invoice text explicitly highlighted and submitted by the user is sent to the AegisPay verification endpoint. No passive browsing history or keystrokes are collected.
+- **Data Storage:** Scan history is stored locally on the user's device via `chrome.storage.local`.
 
-The packaged worker has automated HTTP integration coverage. Chrome installation and side panel interaction require a browser session with the unpacked extension loaded.
+## 4. Version History
+
+- **2.0.0 (2026-10-28):** Added automatic localhost-to-Vercel endpoint failover, multi-currency invoice detection, and Llama Prompt Guard 2 telemetry.
+- **1.0.0 (2026-10-23):** Initial Manifest V3 release with Side Panel verification, Context Menu text scanner, and single-use HMAC-SHA256 review tokens.

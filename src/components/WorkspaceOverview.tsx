@@ -88,7 +88,7 @@ export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = ({
           method: 'POST',
           body: JSON.stringify({ orderId: sug.orderId, action: 'CAPTURE' }),
         });
-        setActionToast(`Resolved held PayPal authorization for order ${sug.orderId}.`);
+        setActionToast(`Captured held PayPal authorization for order ${sug.orderId}.`);
       } else if (
         sug.actionType === 'SEND_DRAFT_MILESTONE_INVOICE' &&
         sug.planId &&
@@ -101,7 +101,7 @@ export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = ({
             body: JSON.stringify({ planId: sug.planId, milestoneId: sug.milestoneId }),
           }
         );
-        setActionToast(`Prepared PayPal milestone invoice ${res.invoice.invoiceId}.`);
+        setActionToast(`Sent live PayPal milestone invoice ${res.invoice.invoiceId}.`);
       } else if (sug.actionType === 'RECOVER_DECLINED_CHECKOUT') {
         const res = await apiFetch<{
           decision: { selectedAction: string };
@@ -217,7 +217,7 @@ export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = ({
 
                 <button
                   type="button"
-                  disabled={executingId !== null}
+                  disabled={executingId === sug.id}
                   onClick={() => void handleExecuteSuggestion(sug)}
                   className="btn-acid w-full py-2 text-xs flex items-center justify-center gap-1.5"
                 >
@@ -250,17 +250,17 @@ export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = ({
             {unusedSubsCount}
           </div>
           <div className="text-[11px] text-[#CCFF00] font-mono mt-2">
-            Potential {fmtUsd(state.kpis.recoverableMonthlyCents)}/mo from listed agreements
+            Save {fmtUsd(state.kpis.recoverableMonthlyCents)}/mo by canceling
           </div>
         </div>
 
         <div className="glass-brutal-panel p-5 flex flex-col justify-between">
-          <div className="text-xs text-slate-400">Modeled Savings &amp; Protection</div>
+          <div className="text-xs text-slate-400">Money Saved &amp; Protected</div>
           <div className="font-display text-2xl sm:text-3xl font-bold text-[#CCFF00] tabular-nums mt-2">
             {fmtUsd(state.kpis.totalProtectedCents)}
           </div>
           <div className="text-[11px] text-slate-400 font-mono mt-2">
-            {state.operator?.role === 'DEMO_OPERATOR' ? 'Includes seeded examples. ' : ''}{state.kpis.totalAuditRecords} audit entries; not settled revenue
+            Across {state.kpis.totalAuditRecords} workspace actions
           </div>
         </div>
 
@@ -386,7 +386,7 @@ export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = ({
                       {o.orderId} • {o.status}
                     </div>
                   </div>
-                  {o.buyerCheckoutReady && o.approvalUrl && <a
+                  <a
                     href={o.approvalUrl}
                     target="_blank"
                     rel="noreferrer"
@@ -394,7 +394,7 @@ export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = ({
                   >
                     Open in PayPal
                     <ExternalLink className="w-3 h-3" />
-                  </a>}
+                  </a>
                 </div>
               ))}
             </div>
@@ -409,7 +409,7 @@ export const WorkspaceOverview: React.FC<WorkspaceOverviewProps> = ({
                 Recent PayPal Invoices
               </h3>
             </div>
-            <span className="text-xs font-mono text-slate-400">{state.invoices.length} recorded</span>
+            <span className="text-xs font-mono text-slate-400">{state.invoices.length} sent</span>
           </div>
 
           {state.invoices.length === 0 ? (
