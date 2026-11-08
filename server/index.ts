@@ -1344,8 +1344,15 @@ export function createAegisServer(options: AegisServerOptions = {}) {
           zombieReport: auditPayPalPermissions(ws.billingPermissions),
         };
       }
-      if (action === 'IMPORT_TEXT' && typeof args.rawText === 'string') {
-        const parsed = await geminiEngine.parseSubscriptionsFromInput({ rawText: args.rawText });
+      if (
+        action === 'IMPORT_TEXT' &&
+        (typeof args.rawText === 'string' || typeof args.imageBase64 === 'string')
+      ) {
+        const parsed = await geminiEngine.parseSubscriptionsFromInput({
+          rawText: String(args.rawText || ''),
+          imageBase64: typeof args.imageBase64 === 'string' ? args.imageBase64 : undefined,
+          imageMimeType: typeof args.imageMimeType === 'string' ? args.imageMimeType : undefined,
+        });
         for (const item of parsed.subscriptions) {
           ws.billingPermissions.unshift(item);
         }
@@ -1448,6 +1455,8 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         sanitizedText: detResult.sanitizedText,
         claimedAmountCents: amount,
         payeeIdentifier: payee,
+        imageBase64: typeof args.imageBase64 === 'string' ? args.imageBase64 : undefined,
+        imageMimeType: typeof args.imageMimeType === 'string' ? args.imageMimeType : undefined,
       });
       const finalVerdict = stricterVerdict(
         detResult.deterministicVerdict,
@@ -1501,6 +1510,8 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const visionResult = await geminiEngine.extractVisionDefectTelemetry({
         itemTitle,
         customerNote,
+        imageBase64: typeof args.imageBase64 === 'string' ? args.imageBase64 : undefined,
+        imageMimeType: typeof args.imageMimeType === 'string' ? args.imageMimeType : undefined,
       });
       const calculation = calculateDeterministicVisionRefund({
         orderId: 'PAYPAL-SBX-8F92A1C4E7B01',
@@ -2306,7 +2317,13 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         deterministicRule: result.deterministicExplanation,
       });
 
-      res.json({ result, payIn4Simulation, aiAdvisor, updatedPermit: ws.agentPermits[0] });
+      res.json({
+        result,
+        evaluation: result,
+        payIn4Simulation,
+        aiAdvisor,
+        updatedPermit: ws.agentPermits[0],
+      });
     } catch (err) {
       res.status(400).json({ error: redactSecrets((err as Error).message) });
     }
@@ -2410,6 +2427,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         parsed,
         parsedQuery: parsed,
         result,
+        evaluation: result,
         payIn4Simulation,
         aiAdvisor,
         currentCheckingBalanceCents: ws.currentCheckingBalanceCents,
@@ -2505,8 +2523,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
   app.post('/api/lupa/compile-policy', async (req, res) => {
     try {
       const ws = getWorkspace(req);
-      const { sentence, applyToPermitId } = req.body || {};
-      const cleanSentence = String(sentence || '').trim();
+      const { sentence, naturalLanguageRule, applyToPermitId, applyToActivePermit } =
+        req.body || {};
+      const cleanSentence = String(sentence || naturalLanguageRule || '').trim();
       if (!cleanSentence) {
         res.status(400).json({ error: 'Provide a plain-English spending rule sentence.' });
         return;
@@ -2522,9 +2541,14 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const groundingCheck = verifyGroundedNumbers(cleanSentence, proposedDollarValues);
 
       let updatedPermit: AgentSpendingPermit | null = null;
-      if (applyToPermitId && groundingCheck.grounded && compiled.promptGuard.label === 'BENIGN') {
+      if (
+        (applyToPermitId || applyToActivePermit) &&
+        groundingCheck.grounded &&
+        compiled.promptGuard.label === 'BENIGN'
+      ) {
         const target =
-          ws.agentPermits.find((p) => p.permitId === applyToPermitId) || ws.agentPermits[0];
+          (applyToPermitId && ws.agentPermits.find((p) => p.permitId === applyToPermitId)) ||
+          ws.agentPermits[0];
         if (target) {
           if (compiled.maxSingleUsd && compiled.maxSingleUsd > 0) {
             target.maxSingleTransactionCents = Math.round(compiled.maxSingleUsd * 100);
@@ -3688,7 +3712,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       });
 
       let paypalInvoice = null;
-      if (issueLiveInvoice) {
+      if (issueLiveInvoice || req.body?.createDepositInvoice) {
         paypalInvoice = await paypalGateway.createLiveInvoice({
           ownerTenantId: ws.tenantId,
           title: `${buyerMandate.itemTitle} (${contract.agreedTerms.upfrontDepositPct}% Deposit)`,
@@ -3755,6 +3779,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         },
         paypalOrder,
         paypalInvoice,
+        depositInvoice: paypalInvoice || paypalOrder,
         auditRow,
       });
     } catch (err) {
@@ -3774,6 +3799,12 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     const {
       tierPercentages,
       tierRefundPercentages,
+      minorCosmeticPct,
+      minorCosmeticRefundPct,
+      moderateCosmeticPct,
+      moderateFunctionalRefundPct,
+      functionalImpairedPct,
+      maxPartialRefundCapPct,
       minPhotoAuthenticityConfidence,
       minAuthenticityConfidence,
       estimatedReturnShippingLabelCents,
@@ -3794,6 +3825,34 @@ export function createAegisServer(options: AegisServerOptions = {}) {
           );
         }
       }
+    }
+    const minorVal =
+      typeof minorCosmeticPct === 'number' ? minorCosmeticPct : minorCosmeticRefundPct;
+    if (typeof minorVal === 'number') {
+      ws.merchantPolicy.tierRefundPercentages.COSMETIC_MINOR = Math.max(
+        0,
+        Math.min(100, Math.round(minorVal))
+      );
+    }
+    const modVal =
+      typeof moderateCosmeticPct === 'number'
+        ? moderateCosmeticPct
+        : moderateFunctionalRefundPct;
+    if (typeof modVal === 'number') {
+      ws.merchantPolicy.tierRefundPercentages.COSMETIC_MODERATE = Math.max(
+        0,
+        Math.min(100, Math.round(modVal))
+      );
+    }
+    const funcVal =
+      typeof functionalImpairedPct === 'number'
+        ? functionalImpairedPct
+        : maxPartialRefundCapPct;
+    if (typeof funcVal === 'number') {
+      ws.merchantPolicy.tierRefundPercentages.FUNCTIONAL_IMPAIRED = Math.max(
+        0,
+        Math.min(100, Math.round(funcVal))
+      );
     }
     const incomingConf =
       typeof minAuthenticityConfidence === 'number'
@@ -3880,7 +3939,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const imageSeed = simulateReplayAttack
         ? 'REPLAY_IMAGE_STATIC_DIGEST'
         : imageBase64
-          ? `${imageBase64.slice(0, 512)}_${Date.now()}`
+          ? imageBase64.trim()
           : `${effectivePresetId || resolvedItemTitle}_${resolvedNote}_${Date.now()}`;
       const imageSha256 = sha256Hex(imageSeed);
 
@@ -4501,6 +4560,14 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     if (params.forceWorkflow) {
       detectedWorkflow = params.forceWorkflow as typeof detectedWorkflow;
     } else if (
+      lower.includes('cancel my subscription') ||
+      lower.includes('want to cancel') ||
+      lower.includes('thinking of canceling') ||
+      lower.includes('cancel our plan') ||
+      lower.includes('unsubscribe')
+    ) {
+      detectedWorkflow = 'CHURN_SAVER';
+    } else if (
       lower.includes('.csv') ||
       (lower.includes('subscription') && (lower.includes('autopay') || lower.includes('/mo'))) ||
       lower.includes('recurring charge') ||
@@ -4534,14 +4601,6 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     ) {
       detectedWorkflow = 'DAMAGE_REFUND';
     } else if (
-      lower.includes('cancel my subscription') ||
-      lower.includes('want to cancel') ||
-      lower.includes('thinking of canceling') ||
-      lower.includes('cancel our plan') ||
-      lower.includes('unsubscribe')
-    ) {
-      detectedWorkflow = 'CHURN_SAVER';
-    } else if (
       lower.includes('milestone') ||
       lower.includes('statement of work') ||
       lower.includes('sow') ||
@@ -4562,6 +4621,8 @@ export function createAegisServer(options: AegisServerOptions = {}) {
       const res = await executeMcpToolCall(ws, 'aegispay_audit_subscriptions', {
         action: 'IMPORT_TEXT',
         rawText: raw || 'Legacy Cloud Backup $49.00/mo, unused for 120 days',
+        imageBase64: params.imageBase64,
+        imageMimeType: params.imageMimeType,
       });
       return {
         detectedWorkflow,
@@ -4601,6 +4662,8 @@ export function createAegisServer(options: AegisServerOptions = {}) {
     if (detectedWorkflow === 'DAMAGE_REFUND') {
       const res = await executeMcpToolCall(ws, 'aegispay_cliprefund_evaluate', {
         naturalDescription: raw,
+        imageBase64: params.imageBase64,
+        imageMimeType: params.imageMimeType,
       });
       return {
         detectedWorkflow,
@@ -4652,6 +4715,8 @@ export function createAegisServer(options: AegisServerOptions = {}) {
 
     const scamRes = await executeMcpToolCall(ws, 'aegispay_scamshield_review', {
       rawText: raw || 'Invoice #1049 for UI Design: $45.00 USD via PayPal.',
+      imageBase64: params.imageBase64,
+      imageMimeType: params.imageMimeType,
     });
     return {
       detectedWorkflow: 'INVOICE_SAFETY',
