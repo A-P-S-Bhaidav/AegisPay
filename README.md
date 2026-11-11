@@ -11,7 +11,8 @@
 [![PayPal Platform](https://img.shields.io/badge/PAYPAL_SANDBOX-ORDERS_%7C_VAULT_%7C_INVOICING_%7C_SUBS-0047FF?style=flat-square&labelColor=050507)](https://developer.paypal.com)
 [![MCP Server](https://img.shields.io/badge/MCP_SERVER-13_TOOLS_(HTTP_%7C_STDIO_%7C_WEBMCP)-CCFF00?style=flat-square&labelColor=050507)](./mcp-server/index.mjs)
 [![PayRevive Lift](https://img.shields.io/badge/PAYREVIVE_500_BATCHES-%2B51.4%25_NET_RECOVERY_%7C_0_VIOLATIONS-0047FF?style=flat-square&labelColor=050507)](./shared/payrevive.ts)
-[![Automated Tests](https://img.shields.io/badge/VERIFICATION-376_PASSING_TESTS-CCFF00?style=flat-square&labelColor=050507)](./tests)
+[![CI](https://github.com/A-P-S-Bhaidav/AegisPay/actions/workflows/ci.yml/badge.svg)](https://github.com/A-P-S-Bhaidav/AegisPay/actions/workflows/ci.yml)
+[![Automated Tests](https://img.shields.io/badge/VERIFICATION-365_PASSING_TESTS-CCFF00?style=flat-square&labelColor=050507)](./tests)
 
 **[Live Production App](https://aegispay-orpin.vercel.app)** · **[Master Setup & Deployment Guide](./MASTER_GUIDE.md)** · **[System Architecture](./docs/SYSTEM_ARCHITECTURE.md)** · **[Verification Report](./docs/VERIFICATION.md)** · **[Postman Collection v2.1](./postman/AegisPay_Collection.json)** · **[Chrome Extension MV3](./CHROMEWEBSTORE.md)** · **[Submission Materials](./submission/README.md)**
 
@@ -185,15 +186,36 @@ npm start
 
 Open **[http://localhost:8787](http://localhost:8787)**. Create an account to use live configured providers, or use a PayPal Sandbox personal buyer account (distinct from the sandbox business merchant) to approve checkouts.
 
-### Automated Verification Suites (`376 Passing Tests`)
+### Automated Verification (`359 Vitest + 6 real-browser tests`)
+
+| Tier | Location | Count | What it proves |
+| :--- | :--- | :--- | :--- |
+| Unit | `tests/kernel.test.ts` | 265 | Deterministic kernel: money math, permits, tokens, PayRevive, fuzzers |
+| Integration | `tests/api.test.ts`, `tests/mcp.test.ts`, `tests/contract.test.ts` | 87 | Real HTTP server, auth, tenancy, MCP JSON-RPC, client-to-server route contract |
+| API end-to-end | `tests/e2e.test.ts` | 7 | Full user journeys over HTTP |
+| Browser end-to-end | `tests/browser/journey.spec.ts` (Playwright, Chromium) | 6 | Real UI: landing, workspace, session persistence, agent routing, compulsory photo gate, extension download |
+| Post-deploy smoke | `scripts/smoke.mjs` | 8 checks | Live deployment health, session, MCP tools, agent routing, refund photo gate |
 
 ```bash
-npm run typecheck          # Zero-error strict TypeScript verification
-npm test                   # Runs all 376 tests across 6 suites (kernel, API, MCP, extension, payment integrity, security boundaries)
-npm run build              # Packages extension.zip, bundles serverless API, and builds Vite production bundle
+npm run typecheck           # Strict TypeScript, zero errors
+npm test                    # All 359 Vitest tests (unit + integration + API e2e)
+npm run test:coverage       # Same, with v8 coverage and regression thresholds
+npm run test:e2e            # Playwright real-browser journeys (npx playwright install chromium first)
+npm run ci                  # typecheck, coverage, build, browser e2e: the exact CI gate
+node scripts/smoke.mjs https://aegispay-orpin.vercel.app   # Smoke-test any deployment
+npm run build               # Packages extension.zip, bundles serverless API, and builds Vite production bundle
 npm run benchmark:payrevive # Runs reproducible 500-batch (10,000-payment) synthetic PayRevive benchmark
-npm run verify:providers   # Opt-in live PayPal Sandbox + Gemini/Groq provider verification
+npm run verify:providers    # Opt-in live PayPal Sandbox + Gemini/Groq provider verification
 ```
+
+Measured coverage of `server/` and `shared/`: about 81% statements, 66% branches, 95% functions. Thresholds in `vitest.config.ts` fail CI if it regresses.
+
+### CI/CD
+
+* **CI** (`.github/workflows/ci.yml`, on every push and pull request): typecheck and coverage, production build with extension ZIP and MV3 manifest validation, Playwright browser E2E, and a production-dependency `npm audit` gate.
+* **CD**: Vercel's Git integration deploys every push to `main` to production. `.github/workflows/post-deploy-smoke.yml` runs `scripts/smoke.mjs` against each successful production deployment.
+* **Known limits**: voice input uses the browser Web Speech API and is not exercised headlessly; the Chrome extension is validated structurally (manifest and ZIP) rather than loaded into a live Chrome profile in CI; only Chromium is covered.
+
 
 ---
 

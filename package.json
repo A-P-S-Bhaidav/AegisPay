@@ -16,7 +16,14 @@
     "test:watch": "vitest",
     "train:payrevive": "tsx scripts/train-payrevive-gbdt.ts",
     "benchmark:payrevive": "tsx scripts/benchmark-payrevive.ts",
-    "mcp": "node mcp-server/index.mjs"
+    "mcp": "node mcp-server/index.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run tests/kernel.test.ts",
+    "test:integration": "vitest run tests/api.test.ts tests/mcp.test.ts tests/contract.test.ts",
+    "test:e2e:api": "vitest run tests/e2e.test.ts",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "ci": "npm run typecheck && npm run test:coverage && npm run build && npm run test:e2e"
   },
   "dependencies": {
     "ag-grid-community": "^33.1.1",
@@ -29,12 +36,14 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.4",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
     "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-v8": "^3.2.7",
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.2",
     "esbuild": "^0.25.0",
@@ -43,6 +52,6 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vite": "^6.1.0",
-    "vitest": "^3.0.5"
+    "vitest": "^3.2.7"
   }
 }

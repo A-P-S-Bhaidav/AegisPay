@@ -1,0 +1,29 @@
+name: Post-deploy smoke
+
+# Continuous Delivery here is Vercel's Git integration (every push to main auto-deploys).
+# Vercel reports the finished deployment back to GitHub as a `deployment_status` event;
+# this workflow reacts to that event, so it always tests the exact deployment that just
+# went live (no race against a still-building deploy) and never a stale one.
+
+on:
+  deployment_status:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke-test live production
+    # Only the Production environment (preview URLs may sit behind Vercel SSO protection).
+    if: >-
+      github.event.deployment_status.state == 'success' &&
+      github.event.deployment.environment == 'Production'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run smoke checks against ${{ github.event.deployment_status.target_url }}
+        run: node scripts/smoke.mjs "${{ github.event.deployment_status.target_url }}"
