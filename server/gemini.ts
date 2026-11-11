@@ -8,6 +8,7 @@ import {
   DamageSeverityTier,
   DecisionVerdict,
   DefectCategory,
+  evaluateClaimToImageConsistency,
   MilestoneProposalInput,
   NegotiationOfferTerms,
   PayPalBillingPermission,
@@ -283,7 +284,8 @@ export class GeminiCognitiveEngine {
       for (const candidateModel of geminiCandidates) {
         try {
           const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 4800);
+          const timeoutMs = inlineImageBase64?.data ? 12000 : 4800;
+          const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
           const generationConfig: Record<string, unknown> = {
             temperature: 0.15,
@@ -586,6 +588,7 @@ Untrusted Request Text: """${params.sanitizedText}"""`,
     customerNote: string;
     imageBase64?: string;
     imageMimeType?: string;
+    imageFileName?: string;
   }): Promise<{
     telemetry: VisionDefectTelemetry;
     engineMode: ActiveAiProvider;
@@ -593,8 +596,16 @@ Untrusted Request Text: """${params.sanitizedText}"""`,
   }> {
     const { data: liveVision, telemetry: failoverTelemetry } =
       await this.callAiWithGroqFailover<VisionDefectTelemetry>(
-        `You are ClipRefund Vision AI. Inspect the product photo and customer description to extract ONLY physical defect telemetry.
-CRITICAL RULE: You have ZERO authority to suggest dollar amounts, prices, or refund percentages.
+        `You are ClipRefund Vision AI, a strict multimodal product and defect classifier.
+Inspect the uploaded image and compare what is visually present in the image against the customer's claimed Item and Customer Note.
+CRITICAL RULES:
+1. You have ZERO authority to suggest dollar amounts, prices, or refund percentages.
+2. Classify what object is actually visible in the uploaded photo ("detectedItemCategory") and what physical damage is visibly present in the photo.
+3. Strictly verify Claim-to-Image alignment:
+   - Set "imageMatchesClaimedItem": true ONLY if the object visible in the photo is genuinely the claimed Item (or the same product type). Set "imageMatchesClaimedItem": false if the photo shows a different object/product, a person/selfie, an animal/pet, a random screenshot/document, a solid-color/blank/abstract image, or an unrelated scene.
+   - Set "imageMatchesClaimedDamage": true ONLY if the photo visibly shows physical damage consistent with the Customer Note. Set "imageMatchesClaimedDamage": false if the item in the photo looks intact/undamaged, shows a completely different condition than claimed, or if no real damaged product is visible in the photo.
+   - Set "mismatchReason": if imageMatchesClaimedItem is false OR imageMatchesClaimedDamage is false, write a concise 1-sentence explanation stating what the uploaded photo actually shows versus what the user claimed (otherwise "").
+4. Whenever imageMatchesClaimedItem is false OR imageMatchesClaimedDamage is false, you MUST set "defectCategory": "NONE", "severityTier": "NONE", "affectedSurfacePct": 0, and "photoAuthenticityConfidence" <= 0.2.
 Output JSON matching strictly:
 {
   "detectedItemCategory": string,
@@ -603,9 +614,12 @@ Output JSON matching strictly:
   "affectedSurfacePct": number (0..100),
   "itemStillUsable": boolean,
   "photoAuthenticityConfidence": number (0.0..1.0),
+  "imageMatchesClaimedItem": boolean,
+  "imageMatchesClaimedDamage": boolean,
+  "mismatchReason": string,
   "visualObservations": string[]
 }`,
-        `Item: ${params.itemTitle}\nCustomer Note: ${params.customerNote}`,
+        `Claimed Item: ${params.itemTitle}\nClaimed Customer Defect Note: ${params.customerNote}${params.imageFileName ? `\nUploaded Filename: ${params.imageFileName}` : ''}`,
         params.imageBase64
           ? { mimeType: params.imageMimeType || 'image/png', data: params.imageBase64 }
           : undefined
@@ -631,31 +645,93 @@ Output JSON matching strictly:
 
     if (
       liveVision &&
-      validCategories.includes(liveVision.defectCategory as DefectCategory) &&
-      validTiers.includes(liveVision.severityTier as DamageSeverityTier) &&
+      typeof liveVision === 'object' &&
       params.presetId !== 'synthetic_spoof_photo'
     ) {
+      const rawCategory = String(liveVision.defectCategory || 'NONE')
+        .toUpperCase()
+        .trim() as DefectCategory;
+      const rawTier = String(liveVision.severityTier || 'NONE')
+        .toUpperCase()
+        .trim() as DamageSeverityTier;
+      const normalizedCategory: DefectCategory = validCategories.includes(rawCategory)
+        ? rawCategory
+        : 'NONE';
+      const normalizedTier: DamageSeverityTier = validTiers.includes(rawTier) ? rawTier : 'NONE';
+
+      const matchesItem = liveVision.imageMatchesClaimedItem !== false;
+      const matchesDamage = liveVision.imageMatchesClaimedDamage !== false;
+      const isMatched = matchesItem && matchesDamage;
+      const parsedSurfacePct = Number(liveVision.affectedSurfacePct);
+      const parsedConfidence = Number(liveVision.photoAuthenticityConfidence);
+      const mismatchReason =
+        typeof liveVision.mismatchReason === 'string' && liveVision.mismatchReason.trim()
+          ? liveVision.mismatchReason.trim()
+          : !isMatched
+            ? `Uploaded image (${liveVision.detectedItemCategory || 'unrecognized scene'}) does not match the claimed item ("${params.itemTitle}") or defect ("${params.customerNote}").`
+            : undefined;
+
       return {
         telemetry: {
           detectedItemCategory: liveVision.detectedItemCategory || params.itemTitle,
-          defectCategory: liveVision.defectCategory as DefectCategory,
-          severityTier: liveVision.severityTier as DamageSeverityTier,
-          affectedSurfacePct: Math.max(0, Math.min(100, Number(liveVision.affectedSurfacePct) || 12)),
+          defectCategory: isMatched ? normalizedCategory : 'NONE',
+          severityTier: isMatched ? normalizedTier : 'NONE',
+          affectedSurfacePct: isMatched
+            ? Number.isFinite(parsedSurfacePct)
+              ? Math.max(0, Math.min(100, parsedSurfacePct))
+              : 12
+            : 0,
           itemStillUsable:
             typeof liveVision.itemStillUsable === 'boolean' ? liveVision.itemStillUsable : true,
-          photoAuthenticityConfidence: Math.max(
-            0,
-            Math.min(1, Number(liveVision.photoAuthenticityConfidence) || 0.94)
-          ),
+          photoAuthenticityConfidence: Number.isFinite(parsedConfidence)
+            ? Math.max(0, Math.min(1, parsedConfidence))
+            : isMatched
+              ? 0.94
+              : 0.15,
+          imageMatchesClaimedItem: matchesItem,
+          imageMatchesClaimedDamage: matchesDamage,
+          mismatchReason,
           visualObservations:
             Array.isArray(liveVision.visualObservations) && liveVision.visualObservations.length > 0
               ? liveVision.visualObservations.slice(0, 4)
-              : ['Verified physical defect via Multimodal Vision inspection.'],
+              : [
+                  isMatched
+                    ? 'Verified physical defect via Multimodal Vision inspection.'
+                    : mismatchReason || 'Uploaded image does not match the claimed item or defect.',
+                ],
         },
         engineMode: failoverTelemetry.activeProviderUsed,
         failoverTelemetry,
       };
     }
+
+    const finalizeFallbackTelemetry = (base: VisionDefectTelemetry): VisionDefectTelemetry => {
+      const consistency = evaluateClaimToImageConsistency({
+        claimedItemTitle: params.itemTitle,
+        claimedCustomerNote: params.customerNote,
+        imageFileName: params.imageFileName,
+        telemetry: base,
+      });
+      if (!consistency.matches) {
+        return {
+          ...base,
+          defectCategory: 'NONE',
+          severityTier: 'NONE',
+          affectedSurfacePct: 0,
+          imageMatchesClaimedItem: consistency.imageMatchesClaimedItem,
+          imageMatchesClaimedDamage: consistency.imageMatchesClaimedDamage,
+          mismatchReason: consistency.reason,
+          visualObservations: [
+            consistency.reason || 'Uploaded photo does not match the claimed item or defect.',
+          ],
+        };
+      }
+      return {
+        ...base,
+        imageMatchesClaimedItem: true,
+        imageMatchesClaimedDamage: true,
+      };
+    };
 
     const presetMap: Record<string, VisionDefectTelemetry> = {
       chipped_ceramic_mug: {
@@ -736,7 +812,7 @@ Output JSON matching strictly:
 
     if (params.presetId && presetMap[params.presetId]) {
       return {
-        telemetry: presetMap[params.presetId],
+        telemetry: finalizeFallbackTelemetry(presetMap[params.presetId]),
         engineMode: failoverTelemetry.activeProviderUsed,
         failoverTelemetry,
       };
@@ -793,7 +869,7 @@ Output JSON matching strictly:
       itemStillUsable = true;
     }
 
-    const customTelemetry: VisionDefectTelemetry = {
+    const customTelemetry: VisionDefectTelemetry = finalizeFallbackTelemetry({
       detectedItemCategory: params.itemTitle || 'Customer Order Item',
       defectCategory,
       severityTier,
@@ -806,7 +882,7 @@ Output JSON matching strictly:
           ? 'Core item functionality remains intact; ideal candidate for instant keep-the-item partial refund to save reverse shipping.'
           : 'Item functionality is severely compromised based on customer report.',
       ],
-    };
+    });
 
     return {
       telemetry: customTelemetry,

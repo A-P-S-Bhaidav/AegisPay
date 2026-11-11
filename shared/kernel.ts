@@ -970,7 +970,149 @@ export interface VisionDefectTelemetry {
   affectedSurfacePct: number; // Clamped 0..100
   itemStillUsable: boolean;
   photoAuthenticityConfidence: number; // 0.0 to 1.0
+  imageMatchesClaimedItem?: boolean;
+  imageMatchesClaimedDamage?: boolean;
+  mismatchReason?: string;
   visualObservations: string[];
+}
+
+export interface ClaimToImageConsistencyResult {
+  matches: boolean;
+  imageMatchesClaimedItem: boolean;
+  imageMatchesClaimedDamage: boolean;
+  reason?: string;
+}
+
+const PRODUCT_CATEGORY_GROUPS: Array<{ group: string; pattern: RegExp }> = [
+  {
+    group: 'DRINKWARE_KITCHEN',
+    pattern:
+      /\b(mug|cup|carafe|kettle|stoneware|ceramic|porcelain|tumbler|bottle|plate|bowl|saucer|teapot|pitcher|glassware|drinkware|tableware|kitchenware|pour-over|espresso|grinder|blender|toaster|pan|pot|skillet|cookware)\b/i,
+  },
+  {
+    group: 'ELECTRONICS_COMPUTING',
+    pattern:
+      /\b(monitor|laptop|stand|arm|vesa|riser|keyboard|mouse|phone|smartphone|tablet|ipad|macbook|screen|display|cable|charger|adapter|headphone|earbud|speaker|webcam|dock|hub|computer|pc|electronics)\b/i,
+  },
+  {
+    group: 'LIGHTING_FIXTURE',
+    pattern: /\b(lamp|pendant|chandelier|sconce|lantern|bulb|lampshade|fixture|lighting)\b/i,
+  },
+  {
+    group: 'APPAREL_ACCESSORIES',
+    pattern:
+      /\b(shirt|t-shirt|jacket|hoodie|sweater|coat|pants|jeans|trousers|dress|skirt|shoe|sneaker|boot|sandal|bag|backpack|handbag|purse|wallet|watch|sunglasses|hat|cap|apparel|clothing)\b/i,
+  },
+  {
+    group: 'FURNITURE_DECOR',
+    pattern:
+      /\b(chair|armchair|sofa|couch|sectional|mattress|bedframe|bookcase|bookshelf|cabinet|dresser|wardrobe|stool|ottoman)\b/i,
+  },
+];
+
+const UNRELATED_NON_PRODUCT_PATTERN =
+  /\b(cat|kitten|dog|puppy|pet|animal|bird|selfie|portrait|person|human|face|car|truck|vehicle|motorcycle|landscape|mountain|beach|forest|sky|food|pizza|burger|meme|wallpaper|blank|solid\s+color|color\s+block|unrelated|not\s+a\s+product|no\s+product|screenshot\s+of\s+code|desktop\s+screenshot)\b/i;
+
+const UNDAMAGED_IMAGE_PATTERN =
+  /\b(undamaged|intact|pristine|flawless|no[_-\s]?damage|no[_-\s]?defect|brand[_-\s]?new)\b/i;
+
+function matchCategoryGroups(text: string): string[] {
+  if (!text) return [];
+  return PRODUCT_CATEGORY_GROUPS.filter((g) => g.pattern.test(text)).map((g) => g.group);
+}
+
+export function evaluateClaimToImageConsistency(params: {
+  claimedItemTitle?: string;
+  claimedCustomerNote?: string;
+  imageFileName?: string;
+  telemetry: VisionDefectTelemetry;
+}): ClaimToImageConsistencyResult {
+  const { claimedItemTitle = '', claimedCustomerNote = '', imageFileName = '', telemetry } = params;
+  const normalizedFileText = imageFileName.replace(/[._-]+/g, ' ');
+
+  if (
+    telemetry.imageMatchesClaimedItem === false ||
+    telemetry.imageMatchesClaimedDamage === false
+  ) {
+    const itemOk = telemetry.imageMatchesClaimedItem !== false;
+    const damageOk = telemetry.imageMatchesClaimedDamage !== false;
+    return {
+      matches: false,
+      imageMatchesClaimedItem: itemOk,
+      imageMatchesClaimedDamage: damageOk,
+      reason:
+        telemetry.mismatchReason ||
+        (!itemOk
+          ? `Uploaded image was classified as "${telemetry.detectedItemCategory}", which does not match the claimed item "${claimedItemTitle || 'Order Item'}".`
+          : `Uploaded image does not show the claimed defect ("${claimedCustomerNote || 'reported damage'}").`),
+    };
+  }
+
+  const detectedText = telemetry.detectedItemCategory || '';
+  if (
+    !/Unknown Synthetic Image/i.test(detectedText) &&
+    (UNRELATED_NON_PRODUCT_PATTERN.test(detectedText) ||
+      UNRELATED_NON_PRODUCT_PATTERN.test(normalizedFileText)) &&
+    !UNRELATED_NON_PRODUCT_PATTERN.test(claimedItemTitle)
+  ) {
+    return {
+      matches: false,
+      imageMatchesClaimedItem: false,
+      imageMatchesClaimedDamage: false,
+      reason:
+        telemetry.mismatchReason ||
+        `Uploaded image (${detectedText || imageFileName}) is unrelated to the claimed item "${claimedItemTitle || 'Order Item'}".`,
+    };
+  }
+
+  if (
+    UNDAMAGED_IMAGE_PATTERN.test(normalizedFileText) &&
+    !UNDAMAGED_IMAGE_PATTERN.test(claimedCustomerNote)
+  ) {
+    return {
+      matches: false,
+      imageMatchesClaimedItem: true,
+      imageMatchesClaimedDamage: false,
+      reason: `Uploaded photo ("${imageFileName}") shows an intact/undamaged item, contradicting the reported damage claim.`,
+    };
+  }
+
+  const claimedGroups = matchCategoryGroups(claimedItemTitle);
+  const detectedGroups = matchCategoryGroups(detectedText);
+  if (
+    claimedGroups.length > 0 &&
+    detectedGroups.length > 0 &&
+    !claimedGroups.some((g) => detectedGroups.includes(g))
+  ) {
+    return {
+      matches: false,
+      imageMatchesClaimedItem: false,
+      imageMatchesClaimedDamage: false,
+      reason:
+        telemetry.mismatchReason ||
+        `Uploaded photo was classified as "${detectedText}", which does not match the claimed item "${claimedItemTitle}".`,
+    };
+  }
+
+  const fileGroups = matchCategoryGroups(normalizedFileText);
+  if (
+    claimedGroups.length > 0 &&
+    fileGroups.length > 0 &&
+    !claimedGroups.some((g) => fileGroups.includes(g))
+  ) {
+    return {
+      matches: false,
+      imageMatchesClaimedItem: false,
+      imageMatchesClaimedDamage: false,
+      reason: `Uploaded image ("${imageFileName}") depicts a different product category than the claimed item "${claimedItemTitle}".`,
+    };
+  }
+
+  return {
+    matches: true,
+    imageMatchesClaimedItem: true,
+    imageMatchesClaimedDamage: true,
+  };
 }
 
 export interface MerchantRefundPolicyMatrix {
@@ -1019,6 +1161,9 @@ export function calculateDeterministicVisionRefund(params: {
   previouslyClaimedImageHashes: Set<string>;
   previouslyRefundedCentsOnCapture: number;
   telemetry: VisionDefectTelemetry;
+  claimedItemTitle?: string;
+  claimedCustomerNote?: string;
+  imageFileName?: string;
   policy?: MerchantRefundPolicyMatrix;
 }): ClipRefundCalculationResult {
   const {
@@ -1029,6 +1174,9 @@ export function calculateDeterministicVisionRefund(params: {
     previouslyClaimedImageHashes,
     previouslyRefundedCentsOnCapture,
     telemetry,
+    claimedItemTitle,
+    claimedCustomerNote,
+    imageFileName,
   } = params;
   const policy = params.policy ?? DEFAULT_MERCHANT_REFUND_POLICY;
 
@@ -1051,7 +1199,28 @@ export function calculateDeterministicVisionRefund(params: {
     };
   }
 
-  // 2. Photo authenticity check
+  // 2. Claim-to-Image Classification & Match Gate
+  const consistency = evaluateClaimToImageConsistency({
+    claimedItemTitle,
+    claimedCustomerNote,
+    imageFileName,
+    telemetry,
+  });
+  if (!consistency.matches) {
+    return {
+      approved: false,
+      resolutionType: 'REJECTED_CLAIM',
+      originalOrderCents,
+      refundCents: 0,
+      appliedPercentage: 0,
+      merchantNetSavedCents: 0,
+      estimatedCo2SavedGrams: 0,
+      explanation: `Rejected: Photo classification mismatch — ${consistency.reason}`,
+      calculationHash: sha256Hex({ orderId, captureId, imageSha256, status: 'CLAIM_IMAGE_MISMATCH' }),
+    };
+  }
+
+  // 3. Photo authenticity check
   if (telemetry.photoAuthenticityConfidence < policy.minAuthenticityConfidence) {
     return {
       approved: false,
@@ -1066,7 +1235,7 @@ export function calculateDeterministicVisionRefund(params: {
     };
   }
 
-  // 3. No damage detected
+  // 4. No damage detected
   if (telemetry.severityTier === 'NONE' || telemetry.defectCategory === 'NONE') {
     return {
       approved: false,
@@ -1076,7 +1245,10 @@ export function calculateDeterministicVisionRefund(params: {
       appliedPercentage: 0,
       merchantNetSavedCents: 0,
       estimatedCo2SavedGrams: 0,
-      explanation: 'Rejected: No physical defect detected in visual inspection.',
+      explanation:
+        telemetry.mismatchReason
+          ? `Rejected: ${telemetry.mismatchReason}`
+          : 'Rejected: No physical defect detected in visual inspection.',
       calculationHash: sha256Hex({ orderId, captureId, imageSha256, status: 'NO_DEFECT' }),
     };
   }

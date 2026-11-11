@@ -245,6 +245,7 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
           customerNote: customDamageNote,
           imageBase64: uploadedPhotoBase64,
           imageMimeType: uploadedPhotoMime,
+          imageFileName: uploadedPhotoName || undefined,
           requirePhotoEvidence: true,
           policyOverride: showPolicyEditor
             ? {
@@ -851,12 +852,20 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
           )}
 
           {refundResult?.calculation && (
-            <div className="p-4 bg-[#080B13] border border-[#CCFF00]/60 space-y-2 text-xs">
+            <div
+              className={`p-4 bg-[#080B13] border ${
+                refundResult.calculation.approved ? 'border-[#CCFF00]/60' : 'border-[#FF3366]'
+              } space-y-2 text-xs`}
+            >
               <div className="flex flex-wrap items-center justify-between gap-2 font-semibold text-white">
-                <span>
+                <span
+                  className={
+                    refundResult.calculation.approved ? 'text-white' : 'text-[#FF3366]'
+                  }
+                >
                   {refundResult.calculation.approved
                     ? `Approved ${refundResult.calculation.appliedPercentage}% Refund (${fmtUsd(refundResult.calculation.refundCents)})`
-                    : 'Claim Declined / Full Return Required'}
+                    : 'Claim Declined / Photo Rejected'}
                 </span>
                 {refundResult.calculation.merchantNetSavedCents > 0 && (
                   <span className="text-[#CCFF00] font-mono">
@@ -865,20 +874,41 @@ export const MerchantRecoveryView: React.FC<MerchantRecoveryViewProps> = ({ stat
                 )}
               </div>
               {(refundResult.vision || refundResult.visionTelemetry) && (
-                <div className="text-[11px] font-mono text-sky-300">
-                  Vision Telemetry:{' '}
-                  {refundResult.vision?.detectedItem ||
-                    refundResult.visionTelemetry?.detectedItemCategory}{' '}
-                  • Severity:{' '}
-                  {refundResult.vision?.severity || refundResult.visionTelemetry?.severityTier} (
-                  {Math.round(
-                    ((refundResult.vision?.confidence ??
-                      refundResult.visionTelemetry?.photoAuthenticityConfidence) ||
-                      0.92) * 100
-                  )}
-                  % conf)
+                <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-sky-300">
+                  <span>
+                    Vision Classification:{' '}
+                    {refundResult.vision?.detectedItem ||
+                      refundResult.visionTelemetry?.detectedItemCategory}{' '}
+                    • Severity:{' '}
+                    {refundResult.vision?.severity || refundResult.visionTelemetry?.severityTier} (
+                    {Math.round(
+                      (refundResult.vision?.confidence ??
+                        refundResult.visionTelemetry?.photoAuthenticityConfidence ??
+                        0.92) * 100
+                    )}
+                    % conf)
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 border text-[10px] ${
+                      refundResult.visionTelemetry?.imageMatchesClaimedItem === false ||
+                      refundResult.visionTelemetry?.imageMatchesClaimedDamage === false
+                        ? 'bg-red-950/40 border-[#FF3366] text-[#FF3366]'
+                        : 'bg-[#CCFF00]/15 border-[#CCFF00]/50 text-[#CCFF00]'
+                    }`}
+                  >
+                    {refundResult.visionTelemetry?.imageMatchesClaimedItem === false ||
+                    refundResult.visionTelemetry?.imageMatchesClaimedDamage === false
+                      ? 'MISMATCH: PHOTO != CLAIM'
+                      : 'MATCHED CLAIM'}
+                  </span>
                 </div>
               )}
+              {Array.isArray(refundResult.visionTelemetry?.visualObservations) &&
+                refundResult.visionTelemetry.visualObservations.length > 0 && (
+                  <div className="text-[11px] text-slate-400 font-mono">
+                    {refundResult.visionTelemetry.visualObservations[0]}
+                  </div>
+                )}
               <p className="text-slate-300 leading-relaxed">
                 {refundResult.calculation.explanation}
               </p>

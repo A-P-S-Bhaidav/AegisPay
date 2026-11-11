@@ -1507,11 +1507,14 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         originalOrderCents = parsed.originalOrderCents;
         customerNote = parsed.customerNote;
       }
+      const imageFileName =
+        typeof args.imageFileName === 'string' ? args.imageFileName.trim() : undefined;
       const visionResult = await geminiEngine.extractVisionDefectTelemetry({
         itemTitle,
         customerNote,
         imageBase64: typeof args.imageBase64 === 'string' ? args.imageBase64 : undefined,
         imageMimeType: typeof args.imageMimeType === 'string' ? args.imageMimeType : undefined,
+        imageFileName,
       });
       const calculation = calculateDeterministicVisionRefund({
         orderId: 'PAYPAL-SBX-8F92A1C4E7B01',
@@ -1521,6 +1524,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         previouslyClaimedImageHashes: new Set(),
         previouslyRefundedCentsOnCapture: 0,
         telemetry: visionResult.telemetry,
+        claimedItemTitle: itemTitle,
+        claimedCustomerNote: customerNote,
+        imageFileName,
         policy: ws.merchantPolicy || DEFAULT_MERCHANT_REFUND_POLICY,
       });
       return { visionTelemetry: visionResult.telemetry, calculation };
@@ -3890,6 +3896,7 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         customerNote,
         imageBase64,
         imageMimeType,
+        imageFileName,
         requirePhotoEvidence,
         simulateReplayAttack,
         merchantPolicyOverride,
@@ -3947,12 +3954,18 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         claimedSet.add(imageSha256);
       }
 
+      const resolvedImageFileName =
+        typeof imageFileName === 'string' && imageFileName.trim()
+          ? imageFileName.trim()
+          : undefined;
+
       const visionResult = await geminiEngine.extractVisionDefectTelemetry({
         presetId: effectivePresetId,
         itemTitle: resolvedItemTitle,
         customerNote: resolvedNote,
         imageBase64: typeof imageBase64 === 'string' ? imageBase64 : undefined,
         imageMimeType: typeof imageMimeType === 'string' ? imageMimeType : undefined,
+        imageFileName: resolvedImageFileName,
       });
 
       const incomingOverride = merchantPolicyOverride || policyOverride;
@@ -4002,6 +4015,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
         previouslyClaimedImageHashes: claimedSet,
         previouslyRefundedCentsOnCapture: prevRefunded,
         telemetry: visionResult.telemetry,
+        claimedItemTitle: resolvedItemTitle,
+        claimedCustomerNote: resolvedNote,
+        imageFileName: resolvedImageFileName,
         policy: policyToUse,
       });
 
@@ -4054,6 +4070,9 @@ export function createAegisServer(options: AegisServerOptions = {}) {
           detectedItem: visionResult.telemetry.detectedItemCategory,
           severity: visionResult.telemetry.severityTier,
           confidence: visionResult.telemetry.photoAuthenticityConfidence,
+          imageMatchesClaimedItem: visionResult.telemetry.imageMatchesClaimedItem !== false,
+          imageMatchesClaimedDamage: visionResult.telemetry.imageMatchesClaimedDamage !== false,
+          mismatchReason: visionResult.telemetry.mismatchReason,
         },
         visionEngineMode: visionResult.engineMode,
         failoverTelemetry: visionResult.failoverTelemetry,

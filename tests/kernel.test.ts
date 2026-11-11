@@ -650,6 +650,57 @@ describe('AegisPay Deterministic Financial & Cryptographic Kernel (360+ Test Sui
       expect(res.approved).toBe(false);
       expect(res.refundCents).toBe(0);
     });
+
+    it('rejects photos where the classified item or condition does not match the customer claim', () => {
+      const wrongCategoryRes = calculateDeterministicVisionRefund({
+        orderId: 'ORD-MUG-4',
+        captureId: 'CAP-MUG-4',
+        originalOrderCents: 2800,
+        imageSha256: 'wrong_category_photo_hash',
+        previouslyClaimedImageHashes: new Set(),
+        previouslyRefundedCentsOnCapture: 0,
+        claimedItemTitle: 'Handcrafted Stoneware Espresso Mug',
+        claimedCustomerNote: 'Small cosmetic chip on the rim',
+        telemetry: {
+          detectedItemCategory: 'Anodized Aluminum Laptop Stand',
+          defectCategory: 'SURFACE_SCRATCH',
+          severityTier: 'COSMETIC_MINOR',
+          affectedSurfacePct: 12,
+          itemStillUsable: true,
+          photoAuthenticityConfidence: 0.96,
+          visualObservations: ['Laptop stand scratch'],
+        },
+      });
+      expect(wrongCategoryRes.approved).toBe(false);
+      expect(wrongCategoryRes.refundCents).toBe(0);
+      expect(wrongCategoryRes.explanation).toContain('Photo classification mismatch');
+
+      const explicitMismatchRes = calculateDeterministicVisionRefund({
+        orderId: 'ORD-MUG-5',
+        captureId: 'CAP-MUG-5',
+        originalOrderCents: 2800,
+        imageSha256: 'explicit_mismatch_photo_hash',
+        previouslyClaimedImageHashes: new Set(),
+        previouslyRefundedCentsOnCapture: 0,
+        claimedItemTitle: 'Handcrafted Stoneware Espresso Mug',
+        claimedCustomerNote: 'Small cosmetic chip on the rim',
+        telemetry: {
+          detectedItemCategory: 'Handcrafted Stoneware Espresso Mug',
+          defectCategory: 'NONE',
+          severityTier: 'NONE',
+          affectedSurfacePct: 0,
+          itemStillUsable: true,
+          photoAuthenticityConfidence: 0.2,
+          imageMatchesClaimedItem: true,
+          imageMatchesClaimedDamage: false,
+          mismatchReason: 'Uploaded photo shows an undamaged mug with no rim chip.',
+          visualObservations: ['Mug rim is intact'],
+        },
+      });
+      expect(explicitMismatchRes.approved).toBe(false);
+      expect(explicitMismatchRes.refundCents).toBe(0);
+      expect(explicitMismatchRes.explanation).toContain('undamaged mug');
+    });
   });
 
   // ==========================================================================

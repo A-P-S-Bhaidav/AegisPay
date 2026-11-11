@@ -71,6 +71,16 @@ test.describe('AegisPay in a real browser', () => {
     await submit.click();
     await expect(page.getByText(/Compulsory Photo Required/i)).toBeVisible();
 
+    // 1. Mismatched photo (cat selfie for a stoneware mug claim) must be rejected
+    await page
+      .locator('input[type="file"][accept="image/*"][required]')
+      .setInputFiles({ name: 'cat_selfie.png', mimeType: 'image/png', buffer: uniquePng() });
+    await expect(page.getByText(/VERIFIED PHOTO: cat_selfie\.png/i)).toBeVisible();
+    await submit.click();
+    await expect(page.getByText(/MISMATCH: PHOTO != CLAIM/i)).toBeVisible();
+    await expect(page.getByText(/Claim Declined \/ Photo Rejected/i)).toBeVisible();
+
+    // 2. Matching photo for the claimed item is approved
     await page
       .locator('input[type="file"][accept="image/*"][required]')
       .setInputFiles({ name: 'damaged-item.png', mimeType: 'image/png', buffer: uniquePng() });
@@ -78,9 +88,8 @@ test.describe('AegisPay in a real browser', () => {
 
     await submit.click();
     await expect(page.getByText(/Compulsory Photo Required/i)).toHaveCount(0);
-    await expect(
-      page.getByText(/Approved \d+% Refund|Claim Declined/i).first()
-    ).toBeVisible();
+    await expect(page.getByText(/MATCHED CLAIM/i)).toBeVisible();
+    await expect(page.getByText(/Approved \d+% Refund/i).first()).toBeVisible();
   });
 
   test('chrome extension and postman collection are downloadable from the browser', async ({

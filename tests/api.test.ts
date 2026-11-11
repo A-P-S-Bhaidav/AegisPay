@@ -542,6 +542,25 @@ describe('AegisPay Full-Stack Zero-Trust HTTP API, Security, Multi-Tenant Storag
     const replayData = await replayRes.json();
     expect(replayData.calculation.approved).toBe(false);
     expect(replayData.paypalRefund).toBeNull();
+
+    const mismatchRes = await fetch(`${baseUrl}/api/cliprefund/evaluate-and-refund`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        presetId: 'chipped_ceramic_mug',
+        itemTitle: 'Handcrafted Stoneware Espresso Mug',
+        customerNote: 'Small cosmetic chip on the rim',
+        originalOrderCents: 2800,
+        imageBase64: Buffer.from(`mismatched-laptop-photo-${Date.now()}`).toString('base64'),
+        imageMimeType: 'image/png',
+        imageFileName: 'laptop_monitor_stand.png',
+        requirePhotoEvidence: true,
+      }),
+    });
+    const mismatchData = await mismatchRes.json();
+    expect(mismatchData.calculation.approved).toBe(false);
+    expect(mismatchData.vision.imageMatchesClaimedItem).toBe(false);
+    expect(mismatchData.paypalRefund).toBeNull();
   });
 
   it('POST /api/churnrescue/intercept enforces concession ladder, utilization block, circuit breaker, and atomic lock', async () => {
